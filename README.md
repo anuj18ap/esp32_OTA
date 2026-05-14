@@ -1,5 +1,12 @@
 # ESP32 MQTT OTA Firmware Upgrader
 
+![Platform](https://img.shields.io/badge/Platform-ESP32--WROOM--32E-blue.svg)
+![Application](https://img.shields.io/badge/Application-v0.2-green.svg)
+![Uploader](https://img.shields.io/badge/Uploader-v0.2-brightgreen.svg)
+![Framework](https://img.shields.io/badge/Framework-Arduino-00979D.svg)
+![Build](https://img.shields.io/badge/Build-PlatformIO-orange.svg)
+![OTA](https://img.shields.io/badge/OTA-MQTT-lightgrey.svg)
+
 ## Overview
 
 This project updates ESP32 application firmware over MQTT. The ESP32 firmware connects to Wi-Fi, subscribes to device-specific OTA topics, receives a PlatformIO-generated `.bin` file in chunks, verifies the CRC32, writes the image using the ESP32 `Update` API, and restarts after a successful update.
