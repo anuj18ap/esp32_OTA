@@ -1,14 +1,14 @@
 #pragma once
 
-#define FW_VERSION "0.1"
-#define LED_PIN 2
+#define FW_VERSION "0.2" // Firmware version published to MQTT.
+#define LED_PIN 2        // Onboard LED pin used for heartbeat blinking.
 
-#define MQTT_BUFFER_SIZE 1024
-#define WIFI_RETRY_DELAY 500
-#define MQTT_RETRY_DELAY 2000
-#define LED_BLINK_INTERVAL 1000
+#define MQTT_BUFFER_SIZE 4096   // MQTT packet buffer size for OTA chunks.
+#define WIFI_RETRY_DELAY 500    // Delay between Wi-Fi retry attempts.
+#define MQTT_RETRY_DELAY 2000   // Delay between MQTT retry attempts.
+#define LED_BLINK_INTERVAL 100 // LED heartbeat interval in milliseconds.
 
-extern const char* WIFI_SSID;
-extern const char* WIFI_PASSWORD;
-extern const char* MQTT_BROKER;
-extern const int MQTT_PORT;
+extern const char* WIFI_SSID;     // Wi-Fi network name declared in main.cpp.
+extern const char* WIFI_PASSWORD; // Wi-Fi password declared in main.cpp.
+extern const char* MQTT_BROKER;   // MQTT broker host declared in main.cpp.
+extern const int MQTT_PORT;       // MQTT broker port declared in main.cpp.

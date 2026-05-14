@@ -44,7 +44,8 @@ firmware_path  = None   # Absolute path to selected .bin file
 target_mac     = None   # MAC ID entered by the user
 upload_thread  = None   # Background OTA upload thread
 
-# ACK synchronisation — signalled by _on_message when ACK arrives
+# ACK synchronisation — thread-safe
+_ack_lock     = threading.Lock()
 ack_event     = threading.Event()
 current_chunk = 0       # chunk index we are currently waiting ACK for
 
@@ -70,25 +71,26 @@ def _on_message(client, userdata, msg):
     """
     topic   = msg.topic
     payload = msg.payload.decode(errors="replace")
-    print(f"[MQTT] RX  topic={topic}  payload={payload[:80]}")
 
     # ── ACK from ESP32 for a chunk ──────────────────────────────
     if topic.endswith("/ota/ack"):
         try:
             acked_index = int(payload)
-            if acked_index == current_chunk:
-                ack_event.set()   # unblock the upload worker thread
+            with _ack_lock:
+                # Only signal if this ACK matches what we are waiting for.
+                if acked_index == current_chunk:
+                    ack_event.set()
         except ValueError:
             pass
         return
 
     # ── Status messages from ESP32 ──────────────────────────────
     status_map = {
-        "READY"    : ("ESP32 READY FOR OTA",        "#27ae60"),
-        "UPDATING" : ("ESP32 UPDATING\u2026",        "#e67e22"),
-        "FAILED"   : ("OTA FAILED",                  "#e74c3c"),
-        "NO_UPDATE": ("NO UPDATE AVAILABLE",          "#95a5a6"),
-        "SUCCESS"  : ("OTA SUCCESS \u2713 REBOOTING","#27ae60"),
+        "READY"    : ("ESP32 READY FOR OTA",         "#27ae60"),
+        "UPDATING" : ("ESP32 UPDATING\u2026",         "#e67e22"),
+        "FAILED"   : ("OTA FAILED",                   "#e74c3c"),
+        "NO_UPDATE": ("NO UPDATE AVAILABLE",           "#95a5a6"),
+        "SUCCESS"  : ("OTA SUCCESS \u2713 REBOOTING", "#27ae60"),
     }
 
     if payload in status_map:
@@ -157,11 +159,11 @@ def cb_check_device() -> None:
     target_mac = mac
     upload_btn.config(state=tk.DISABLED)
 
+    # Subscribe only to the topics the PC needs to RECEIVE from ESP32.
     status_topic = f"{target_mac}/ota_status"
-    check_topic  = f"{target_mac}/ota_check"
     ack_topic    = f"{target_mac}/ota/ack"
+    check_topic  = f"{target_mac}/ota_check"
 
-    # Subscribe to status AND ack topics before sending probe
     mqtt_client.subscribe(status_topic, qos=1)
     mqtt_client.subscribe(ack_topic,    qos=1)
     mqtt_client.publish(check_topic, "ARE_YOU_READY", qos=1)
@@ -169,7 +171,6 @@ def cb_check_device() -> None:
     print(f"[APP] Checking device: {target_mac}")
     _update_status("Waiting for ESP32\u2026", "#7f8c8d")
 
-    # Reset progress bar
     progress_bar["value"] = 0
     progress_label.config(text="")
 
@@ -230,12 +231,11 @@ def _upload_worker() -> None:
 
         print(f"[OTA] Size={total_size}B  Chunks={total_chunks}  CRC=0x{crc32_val:08X}")
 
-        # ── 2. Subscribe to OTA topics ──────────────────────────
-        mqtt_client.subscribe(f"{target_mac}/ota/begin",  qos=1)
-        mqtt_client.subscribe(f"{target_mac}/ota/chunk",  qos=1)
-        mqtt_client.subscribe(f"{target_mac}/ota/end",    qos=1)
-
-        # ── 3. Publish BEGIN metadata ───────────────────────────
+        # ── 2. Publish BEGIN metadata ───────────────────────────
+        # NOTE: Do NOT subscribe to ota/begin, ota/chunk, ota/end here.
+        #       Those are topics the ESP32 receives on; subscribing to
+        #       them would echo our own published packets back to us and
+        #       corrupt the ACK detection logic.
         begin_payload = json.dumps({
             "size"  : total_size,
             "chunks": total_chunks,
@@ -244,10 +244,10 @@ def _upload_worker() -> None:
         mqtt_client.publish(f"{target_mac}/ota/begin", begin_payload, qos=1)
         root.after(0, lambda: _update_status("OTA Started \u2014 sending chunks\u2026", "#2980b9"))
 
-        # Give ESP32 time to call Update.begin() before first chunk arrives
-        time.sleep(1.5)
+        # Give ESP32 time to call Update.begin() before first chunk arrives.
+        time.sleep(0.3)
 
-        # ── 4. Send chunks with ACK handshake ───────────────────
+        # ── 3. Send chunks with ACK handshake ───────────────────
         for i in range(total_chunks):
             chunk_data = firmware_data[i * CHUNK_SIZE : (i + 1) * CHUNK_SIZE]
 
@@ -258,8 +258,11 @@ def _upload_worker() -> None:
             success = False
 
             while retries < MAX_RETRIES:
-                current_chunk = i
-                ack_event.clear()
+                # Set current_chunk and clear the event BEFORE publishing
+                # to avoid losing a fast ACK that arrives before wait().
+                with _ack_lock:
+                    current_chunk = i
+                    ack_event.clear()
 
                 mqtt_client.publish(f"{target_mac}/ota/chunk", packet, qos=1)
 
@@ -277,12 +280,12 @@ def _upload_worker() -> None:
                 root.after(0, lambda: _set_controls_enabled(True))
                 return
 
-            # Update progress on main thread
+            # Update progress on main thread.
             pct = int(((i + 1) / total_chunks) * 100)
             root.after(0, lambda p=pct, ci=i + 1, ct=total_chunks:
                 _update_progress(p, ci, ct))
 
-        # ── 5. Publish END ──────────────────────────────────────
+        # ── 4. Publish END ──────────────────────────────────────
         mqtt_client.publish(f"{target_mac}/ota/end", "END", qos=1)
         root.after(0, lambda: _update_status(
             "All chunks sent \u2014 waiting for ESP32 to verify\u2026", "#27ae60"
@@ -309,14 +312,12 @@ def _build_gui() -> tk.Tk:
     win.resizable(False, False)
     win.configure(bg="#1c2333")
 
-    # ── Fonts ───────────────────────────────────────────────────
     font_title  = ("Consolas", 15, "bold")
     font_label  = ("Consolas", 10)
     font_entry  = ("Consolas", 11)
     font_status = ("Consolas", 11, "bold")
     font_btn    = ("Consolas", 10, "bold")
 
-    # ── Colours ─────────────────────────────────────────────────
     BG       = "#1c2333"
     FG       = "#ecf0f1"
     ACCENT   = "#3498db"
@@ -324,7 +325,6 @@ def _build_gui() -> tk.Tk:
     BTN_FG   = "#ecf0f1"
     ENTRY_BG = "#2c3e50"
 
-    # ── Title bar ───────────────────────────────────────────────
     title_frame = tk.Frame(win, bg=ACCENT, height=46)
     title_frame.pack(fill=tk.X)
     tk.Label(
@@ -333,11 +333,9 @@ def _build_gui() -> tk.Tk:
         font=font_title, bg=ACCENT, fg="white", anchor="w",
     ).pack(side=tk.LEFT, padx=12, pady=10)
 
-    # ── Body ────────────────────────────────────────────────────
     body = tk.Frame(win, bg=BG, padx=30, pady=20)
     body.pack(fill=tk.BOTH, expand=True)
 
-    # ── MAC ID row ──────────────────────────────────────────────
     tk.Label(body, text="ESP32 MAC ID", font=font_label, bg=BG, fg=FG, anchor="w")\
         .pack(fill=tk.X, pady=(0, 4))
 
@@ -361,10 +359,8 @@ def _build_gui() -> tk.Tk:
     )
     check_btn.pack(side=tk.LEFT)
 
-    # ── Separator ───────────────────────────────────────────────
     ttk.Separator(body, orient="horizontal").pack(fill=tk.X, pady=10)
 
-    # ── Status label ────────────────────────────────────────────
     global status_label
     status_label = tk.Label(
         body, text="Device Not Checked",
@@ -372,7 +368,6 @@ def _build_gui() -> tk.Tk:
     )
     status_label.pack(fill=tk.X, pady=(0, 8))
 
-    # ── Progress bar ────────────────────────────────────────────
     global progress_bar, progress_label
     progress_label = tk.Label(
         body, text="",
@@ -395,10 +390,8 @@ def _build_gui() -> tk.Tk:
     )
     progress_bar.pack(fill=tk.X, pady=(0, 10))
 
-    # ── Separator ───────────────────────────────────────────────
     ttk.Separator(body, orient="horizontal").pack(fill=tk.X, pady=6)
 
-    # ── Firmware row ────────────────────────────────────────────
     fw_row = tk.Frame(body, bg=BG)
     fw_row.pack(fill=tk.X, pady=(8, 4))
 
@@ -417,7 +410,6 @@ def _build_gui() -> tk.Tk:
     )
     firmware_label.pack(side=tk.LEFT)
 
-    # ── Upload button ────────────────────────────────────────────
     global upload_btn
     upload_btn = tk.Button(
         body,
@@ -429,7 +421,6 @@ def _build_gui() -> tk.Tk:
     )
     upload_btn.pack(pady=18)
 
-    # ── Footer ───────────────────────────────────────────────────
     tk.Label(
         win,
         text=f"MQTT: {MQTT_BROKER}:{MQTT_PORT}   |   Chunk: {CHUNK_SIZE}B   |   ACK timeout: {ACK_TIMEOUT}s",

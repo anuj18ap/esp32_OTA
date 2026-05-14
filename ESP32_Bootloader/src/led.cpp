@@ -6,7 +6,7 @@
 brief       Toggles the onboard LED at a fixed interval to
             show that the firmware loop is running.
 arguments   None
-return type void
+return-type void
 ************************************************************/
 void handleLedBlink()
 {
@@ -20,7 +20,7 @@ void handleLedBlink()
 
         // Flips the LED state between ON and OFF.
         ledState = !ledState;
-        
+
         // Applies the new state to the physical LED pin.
         digitalWrite(LED_PIN, ledState);
     }

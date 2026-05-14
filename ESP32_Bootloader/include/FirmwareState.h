@@ -1,17 +1,61 @@
 #pragma once
 
 #include <Arduino.h>
-#include <PubSubClient.h>
 #include <WiFi.h>
 
-extern WiFiClient espClient;
-extern PubSubClient mqttClient;
+// ── MUST be defined before PubSubClient is included ──────────────────────────
+#define MQTT_MAX_PACKET_SIZE 4096 // PubSubClient packet limit for OTA chunks.
+#include <PubSubClient.h>
 
-extern String deviceID;
-extern String topicInfo;
-extern String topicOTA;
-extern String topicOTACheck;
-extern String topicOTAStatus;
+enum OtaState { OTA_IDLE, OTA_RECEIVING }; // OTA receiver state machine values.
 
-extern unsigned long previousLedMillis;
-extern bool ledState;
+extern WiFiClient   espClient;  // Shared TCP client for MQTT.
+extern PubSubClient mqttClient; // Shared MQTT client instance.
+
+extern String deviceID;       // MAC-derived unique device ID.
+extern String topicInfo;      // MQTT topic for retained device info.
+extern String topicOTACheck;  // MQTT topic for OTA readiness checks.
+extern String topicOTABegin;  // MQTT topic for OTA begin metadata.
+extern String topicOTAChunk;  // MQTT topic for OTA firmware chunks.
+extern String topicOTAEnd;    // MQTT topic for OTA completion command.
+extern String topicOTAAck;    // MQTT topic for chunk acknowledgements.
+extern String topicOTAStatus; // MQTT topic for OTA status messages.
+
+extern unsigned long previousLedMillis; // Last LED toggle timestamp.
+extern bool          ledState;          // Current heartbeat LED state.
+
+extern volatile OtaState otaState; // Shared OTA state flag.
+extern uint32_t expectedChunks;    // Expected firmware chunk count.
+extern uint32_t expectedCRC32;     // Expected firmware CRC32 value.
+extern uint32_t totalSize;         // Expected firmware image size.
+extern uint32_t chunksReceived;    // Count of chunks written to flash.
+extern uint32_t lastChunkIndex;    // Last accepted chunk index.
+
+// Running CRC32 accumulator — updated chunk by chunk, verified at OTA end.
+// Initialise to 0xFFFFFFFF in handleOtaBegin(); XOR with 0xFFFFFFFF once in handleOtaEnd().
+extern uint32_t runningCRC32;
+
+/***********************************************************
+brief       Pure CRC32 accumulator compatible with Python's
+            zlib.crc32.
+            Initialise runningCRC32 = 0xFFFFFFFF before the
+            first chunk (in handleOtaBegin).
+            After the last chunk finalise with:
+                finalCRC = runningCRC32 ^ 0xFFFFFFFF;
+arguments   crc  - Running CRC value (0xFFFFFFFF for first call)
+            data - Pointer to data bytes for this call
+            len  - Number of bytes to process
+return-type uint32_t - Updated running CRC (NOT yet finalised)
+************************************************************/
+inline uint32_t crc32_update(uint32_t crc, const uint8_t* data, size_t len)
+{
+    // No internal XOR — caller seeds with 0xFFFFFFFF and does the
+    // final ^ 0xFFFFFFFF exactly once after all chunks are processed.
+    while (len--)
+    {
+        crc ^= *data++;
+        for (int k = 0; k < 8; k++)
+            crc = (crc >> 1) ^ (0xEDB88320u & -(crc & 1));
+    }
+    return crc;
+}

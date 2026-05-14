@@ -1,5 +1,3 @@
-#include <HTTPClient.h>
-
 #include "Config.h"
 #include "FirmwareApp.h"
 #include "FirmwareState.h"
@@ -8,7 +6,7 @@
 brief       Connects the ESP32 to the configured Wi-Fi network
             and waits until the station connection is active.
 arguments   None
-return type void
+return-type void
 ************************************************************/
 void connectWiFi()
 {
@@ -16,8 +14,7 @@ void connectWiFi()
     if (WiFi.status() == WL_CONNECTED) return;
 
     // Prints the SSID being used for the connection attempt.
-    Serial.print("[WiFi] Connecting to: ");
-    Serial.println(WIFI_SSID);
+    Serial.printf("[WiFi] Connecting to %s", WIFI_SSID);
 
     // Forces station mode and starts the Wi-Fi connection.
     WiFi.mode(WIFI_STA);
@@ -40,64 +37,23 @@ void connectWiFi()
 brief       Publishes the current firmware version to the
             retained MQTT device information topic.
 arguments   None
-return type void
+return-type void
 ************************************************************/
 void publishDeviceInfo()
 {
-    // Builds a small JSON payload with the firmware version.
-    String payload = "{\"firmware\":\"" + String(FW_VERSION) + "\"}";
+    // Builds a retained JSON payload with the firmware version and device ID.
+    String payload = "{\"firmware\":\"" + String(FW_VERSION)
+                   + "\",\"id\":\"" + deviceID + "\"}";
     // Publishes the payload as a retained message.
     mqttClient.publish(topicInfo.c_str(), payload.c_str(), true);
-    Serial.println("[MQTT] Published device info: " + payload);
-}
-
-/***********************************************************
-brief       Processes incoming MQTT messages for OTA readiness
-            checks and OTA update commands.
-arguments   topic   - MQTT topic name received from the broker
-            payload - Raw MQTT message bytes
-            length  - Number of bytes in the payload
-return type void
-************************************************************/
-void mqttCallback(char* topic, byte* payload, unsigned int length)
-{
-    // Converts the raw MQTT payload into an Arduino String.
-    String message;
-    message.reserve(length);
-    for (unsigned int i = 0; i < length; i++)
-        message += (char)payload[i];
-
-    // Converts the received topic into an Arduino String for comparison.
-    String currentTopic(topic);
-
-    Serial.println("[MQTT] RX  topic: " + currentTopic);
-    Serial.println("[MQTT] RX  payload: " + message);
-
-    // Replies to the readiness check so the sender knows the device is online.
-    if (currentTopic == topicOTACheck)
-    {
-        if (message == "ARE_YOU_READY")
-        {
-            mqttClient.publish(topicOTAStatus.c_str(), "READY");
-            Serial.println("[MQTT] Replied READY");
-        }
-        return;
-    }
-
-    // Starts OTA only when an update URL is received.
-    if (currentTopic == topicOTA)
-    {
-        if (message.length() > 0)
-            performOTA(message);
-        return;
-    }
+    Serial.println("[MQTT] Listening on MAC: " + deviceID);
 }
 
 /***********************************************************
 brief       Connects or reconnects to the MQTT broker and
             restores all required topic subscriptions.
 arguments   None
-return type void
+return-type void
 ************************************************************/
 void connectMQTT()
 {
@@ -113,9 +69,12 @@ void connectMQTT()
         {
             Serial.println(" connected.");
             publishDeviceInfo();
-            mqttClient.subscribe(topicOTA.c_str());
-            mqttClient.subscribe(topicOTACheck.c_str());
-            Serial.println("[MQTT] Subscribed to OTA topics.");
+            // Subscribes to the OTA handshake, metadata, chunk, and end topics.
+            mqttClient.subscribe(topicOTACheck.c_str(), 1);
+            mqttClient.subscribe(topicOTABegin.c_str(), 1);
+            mqttClient.subscribe(topicOTAChunk.c_str(), 1);
+            mqttClient.subscribe(topicOTAEnd.c_str(), 1);
+            Serial.println("[MQTT] Subscribed.");
         }
         else
         {
