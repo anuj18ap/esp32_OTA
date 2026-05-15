@@ -6,7 +6,7 @@
 
 const char* WIFI_SSID     = "Anuj prajapati_4G";  // Wi-Fi network name used by the ESP32.
 const char* WIFI_PASSWORD = "anuj9879212759";     // Wi-Fi password used by the ESP32.
-const char* MQTT_BROKER   = "broker.hivemq.com";  // Public MQTT broker used for OTA messages.
+const char* MQTT_BROKER   = "broker.emqx.io";       // Public MQTT broker used for OTA messages.
 const int   MQTT_PORT     = 1883;                 // MQTT TCP port for the broker.
 
 WiFiClient   espClient;            // TCP client used by the MQTT client.
