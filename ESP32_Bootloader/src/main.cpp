@@ -4,8 +4,8 @@
 #include "FirmwareApp.h"
 #include "FirmwareState.h"
 
-const char* WIFI_SSID     = "Anuj prajapati_4G";  // Wi-Fi network name used by the ESP32.
-const char* WIFI_PASSWORD = "anuj9879212759";     // Wi-Fi password used by the ESP32.
+const char* WIFI_SSID     = "AceTech Solution";  // Wi-Fi network name used by the ESP32.
+const char* WIFI_PASSWORD = "AceTech@2023";     // Wi-Fi password used by the ESP32.
 const char* MQTT_BROKER   = "broker.emqx.io";       // Public MQTT broker used for OTA messages.
 const int   MQTT_PORT     = 1883;                 // MQTT TCP port for the broker.
 
