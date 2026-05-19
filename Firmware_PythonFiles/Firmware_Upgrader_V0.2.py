@@ -1,572 +1,684 @@
 """
 ================================================================
- ESP32 OTA Firmware Upgrader — MQTT Only (No HTTP Server)
+ ESP32 OTA Firmware Upgrader — MQTT Only
 ================================================================
- Dependencies:
-     pip install paho-mqtt
-
- Compatible with:
-     paho-mqtt  2.x
-     Python     3.8+
-
- Usage:
-     python esp32_ota_mqtt.py
+ Dependencies:  pip install paho-mqtt
+ Python 3.8+  |  paho-mqtt 2.x
 ================================================================
 """
 
-import os
-import json
-import struct
-import threading
-import time
-import zlib
-
+import os, json, struct, threading, time, zlib
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-
 import paho.mqtt.client as mqtt
 
-# ================================================================
-#  CONFIGURATION
-# ================================================================
+# ─────────────────────────────────────────────
+#  CONFIG
+# ─────────────────────────────────────────────
+MQTT_BROKER = "broker.emqx.io"
+MQTT_PORT   = 1883
+CHUNK_SIZE  = 3072
+ACK_TIMEOUT = 5
+MAX_RETRIES = 3
 
-MQTT_BROKER  = "broker.emqx.io"
-MQTT_PORT    = 1883
-CHUNK_SIZE   = 3072   # bytes per chunk  (safe under 4096 MQTT packet limit)
-ACK_TIMEOUT  = 5      # seconds to wait for ESP32 ACK before retry
-MAX_RETRIES  = 3      # how many times to retry a single chunk before failing
+# ─────────────────────────────────────────────
+#  DESIGN TOKENS
+# ─────────────────────────────────────────────
+BG          = "#0b0f1a"   # deepest background
+SIDEBAR_BG  = "#0e1420"   # sidebar
+PANEL_BG    = "#111827"   # main panel
+CARD_BG     = "#161e2e"   # card surface
+CARD_BORDER = "#1e2d45"   # card outline
+INPUT_BG    = "#0f1829"   # entry fields
+INPUT_BD    = "#243352"   # entry border (idle)
+INPUT_FOCUS = "#3b82f6"   # entry border (active)
 
-# ================================================================
-#  APPLICATION STATE
-# ================================================================
+ACCENT      = "#3b82f6"   # primary blue
+ACCENT_HOV  = "#2563eb"
+SUCCESS     = "#22c55e"
+SUCCESS_HOV = "#16a34a"
+WARNING     = "#f59e0b"
+DANGER      = "#ef4444"
+MUTED       = "#374151"
 
-firmware_path  = None   # Absolute path to selected .bin file
-target_mac     = None   # MAC ID entered by the user
-upload_thread  = None   # Background OTA upload thread
-mqtt_client    = None   # Created after GUI is ready
+TEXT_PRI    = "#f1f5f9"   # headings
+TEXT_SEC    = "#94a3b8"   # labels
+TEXT_DIM    = "#4b5563"   # placeholders
 
-# ACK synchronisation — thread-safe
-_ack_lock     = threading.Lock()
-ack_event     = threading.Event()
-current_chunk = 0       # chunk index we are currently waiting ACK for
+FONT_MONO   = "Courier New"
+FONT_UI     = "Segoe UI" if os.name == "nt" else "TkDefaultFont"
 
-# ================================================================
-#  MQTT STATUS STATES
-# ================================================================
+# ─────────────────────────────────────────────
+#  STATE
+# ─────────────────────────────────────────────
+firmware_path  = None
+target_mac     = None
+mqtt_client    = None
+_ack_lock      = threading.Lock()
+ack_event      = threading.Event()
+current_chunk  = 0
 
-MQTT_STATE_CONNECTING   = "connecting"
-MQTT_STATE_CONNECTED    = "connected"
-MQTT_STATE_DISCONNECTED = "disconnected"
-MQTT_STATE_FAILED       = "failed"
+MQTT_CONN   = "connecting"
+MQTT_OK     = "connected"
+MQTT_DISC   = "disconnected"
+MQTT_FAIL   = "failed"
 
-# ================================================================
+# ─────────────────────────────────────────────
 #  MQTT CALLBACKS
-# ================================================================
-
-def _on_connect(client, userdata, flags, reason_code, properties):
-    if reason_code == 0:
-        print("[MQTT] Connected to broker.")
-        root.after(0, lambda: _set_mqtt_status(MQTT_STATE_CONNECTED))
+# ─────────────────────────────────────────────
+def _on_connect(client, userdata, flags, rc, props):
+    if rc == 0:
+        root.after(0, lambda: _mqtt_indicator(MQTT_OK))
     else:
-        print(f"[MQTT] Connection failed — reason code: {reason_code}")
-        root.after(0, lambda: _set_mqtt_status(MQTT_STATE_FAILED))
+        root.after(0, lambda: _mqtt_indicator(MQTT_FAIL))
 
-
-def _on_disconnect(client, userdata, flags, reason_code, properties):
-    print(f"[MQTT] Disconnected (reason: {reason_code}). Auto-reconnect active.")
-    root.after(0, lambda: _set_mqtt_status(MQTT_STATE_DISCONNECTED))
-
+def _on_disconnect(client, userdata, flags, rc, props):
+    root.after(0, lambda: _mqtt_indicator(MQTT_DISC))
 
 def _on_message(client, userdata, msg):
-    """
-    Dispatch incoming MQTT messages.
-    All Tkinter updates are marshalled via root.after() to stay on main thread.
-    """
     topic   = msg.topic
     payload = msg.payload.decode(errors="replace")
 
-    # ── ACK from ESP32 for a chunk ──────────────────────────────
+    if topic.endswith("/info"):
+        try:
+            d = json.loads(payload)
+            v = d.get("firmware", "?")
+            root.after(0, lambda v=v: _show_fw_version(v))
+        except Exception:
+            pass
+        return
+
     if topic.endswith("/ota/ack"):
         try:
-            acked_index = int(payload)
+            idx = int(payload)
             with _ack_lock:
-                if acked_index == current_chunk:
+                if idx == current_chunk:
                     ack_event.set()
         except ValueError:
             pass
         return
 
-    # ── Status messages from ESP32 ──────────────────────────────
-    status_map = {
-        "READY"    : ("ESP32 READY FOR OTA",          "#27ae60"),
-        "UPDATING" : ("ESP32 UPDATING\u2026",          "#e67e22"),
-        "FAILED"   : ("OTA FAILED",                    "#e74c3c"),
-        "NO_UPDATE": ("NO UPDATE AVAILABLE",            "#95a5a6"),
-        "SUCCESS"  : ("OTA SUCCESS \u2713 REBOOTING",  "#27ae60"),
+    MAP = {
+        "READY"    : ("READY FOR OTA",              SUCCESS),
+        "UPDATING" : ("FLASHING…",                  WARNING),
+        "FAILED"   : ("OTA FAILED",                 DANGER),
+        "NO_UPDATE": ("NO UPDATE AVAILABLE",         TEXT_SEC),
+        "SUCCESS"  : ("SUCCESS  ✓  REBOOTING",       SUCCESS),
     }
-
-    if payload in status_map:
-        text, colour = status_map[payload]
-        root.after(0, lambda t=text, c=colour: _update_status(t, c))
-
+    if payload in MAP:
+        txt, col = MAP[payload]
+        root.after(0, lambda t=txt, c=col: _set_device_status(t, c))
         if payload == "READY":
-            root.after(0, lambda: upload_btn.config(state=tk.NORMAL))
-
+            root.after(0, lambda: upload_btn.config(state=tk.NORMAL,
+                bg=SUCCESS, cursor="hand2"))
         if payload in ("SUCCESS", "FAILED", "NO_UPDATE"):
-            root.after(0, lambda: _set_controls_enabled(True))
+            root.after(0, lambda: _lock_controls(False))
 
-
-# ================================================================
-#  MQTT CONNECT  (called after GUI exists)
-# ================================================================
-
-def _connect_mqtt() -> None:
-    """Build and connect the MQTT client in a background thread so the
-    GUI window opens instantly without blocking on network I/O."""
+# ─────────────────────────────────────────────
+#  MQTT CONNECT
+# ─────────────────────────────────────────────
+def _connect_mqtt():
     global mqtt_client
-
-    def _do_connect():
+    def _worker():
         global mqtt_client
-        root.after(0, lambda: _set_mqtt_status(MQTT_STATE_CONNECTING))
+        root.after(0, lambda: _mqtt_indicator(MQTT_CONN))
         try:
-            client = mqtt.Client(
-                callback_api_version=mqtt.CallbackAPIVersion.VERSION2
-            )
-            client.on_connect    = _on_connect
-            client.on_disconnect = _on_disconnect
-            client.on_message    = _on_message
-            client.reconnect_delay_set(min_delay=1, max_delay=60)
-            client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
-            client.loop_start()
-            mqtt_client = client
-        except Exception as exc:
-            print(f"[MQTT] Initial connect error: {exc}")
-            root.after(0, lambda: _set_mqtt_status(MQTT_STATE_FAILED))
+            c = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
+            c.on_connect    = _on_connect
+            c.on_disconnect = _on_disconnect
+            c.on_message    = _on_message
+            c.reconnect_delay_set(1, 60)
+            c.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+            c.loop_start()
+            mqtt_client = c
+        except Exception as e:
+            print(f"[MQTT] {e}")
+            root.after(0, lambda: _mqtt_indicator(MQTT_FAIL))
+    threading.Thread(target=_worker, daemon=True).start()
 
-    threading.Thread(target=_do_connect, daemon=True, name="MQTT-Connect").start()
+# ─────────────────────────────────────────────
+#  MQTT PULSE ANIMATION
+# ─────────────────────────────────────────────
+_pulse_id  = None
+_pulse_a   = 0.0
+_pulse_dir = 1
 
+def _mqtt_indicator(state):
+    global _pulse_id
+    if _pulse_id:
+        root.after_cancel(_pulse_id)
+        _pulse_id = None
 
-# ================================================================
-#  MQTT STATUS INDICATOR HELPERS
-# ================================================================
+    cfg = {
+        MQTT_CONN : (WARNING,  "Connecting…",                        True),
+        MQTT_OK   : (SUCCESS,  f"MQTT  ·  {MQTT_BROKER}:{MQTT_PORT}", False),
+        MQTT_DISC : (DANGER,   "Disconnected — retrying",            True),
+        MQTT_FAIL : (DANGER,   f"Cannot reach {MQTT_BROKER}",        False),
+    }
+    col, txt, pulse = cfg[state]
+    sb_dot.config(fg=col)
+    sb_text.config(text=txt, fg=col)
+    if pulse:
+        _start_pulse(col)
 
-# Pulsing animation state
-_pulse_after_id  = None
-_pulse_alpha_dir = 1       # +1 growing, -1 shrinking
-_pulse_alpha     = 0.0     # 0.0 – 1.0
+def _start_pulse(col):
+    global _pulse_id, _pulse_a, _pulse_dir
+    _pulse_a, _pulse_dir = 0.0, 1
+    _pulse_id = root.after(35, lambda: _tick_pulse(col))
 
-def _set_mqtt_status(state: str) -> None:
-    """Update the MQTT status dot + label in the status bar. Main thread only."""
-    global _pulse_after_id
-
-    # Stop any existing pulse animation
-    if _pulse_after_id is not None:
-        root.after_cancel(_pulse_after_id)
-        _pulse_after_id = None
-
-    if state == MQTT_STATE_CONNECTING:
-        mqtt_dot.config(fg="#e67e22")          # orange
-        mqtt_status_lbl.config(text=f"Connecting to MQTT_BROKER…", fg="#e67e22")
-        _start_pulse()
-
-    elif state == MQTT_STATE_CONNECTED:
-        mqtt_dot.config(fg="#2ecc71")          # green
-        mqtt_status_lbl.config(text=f"Connected  ·  {MQTT_BROKER}:{MQTT_PORT}", fg="#2ecc71")
-
-    elif state == MQTT_STATE_DISCONNECTED:
-        mqtt_dot.config(fg="#e74c3c")          # red
-        mqtt_status_lbl.config(text="Disconnected — reconnecting…", fg="#e74c3c")
-        _start_pulse()
-
-    elif state == MQTT_STATE_FAILED:
-        mqtt_dot.config(fg="#e74c3c")
-        mqtt_status_lbl.config(text=f"Failed to connect to {MQTT_BROKER}", fg="#e74c3c")
-
-
-def _start_pulse() -> None:
-    """Animate the dot by cycling between two brightness levels."""
-    global _pulse_after_id, _pulse_alpha, _pulse_alpha_dir
-
-    _pulse_alpha     = 0.0
-    _pulse_alpha_dir = 1
-    _pulse_after_id  = root.after(40, _pulse_tick)
-
-
-_PULSE_PAIRS = [
-    ("#e67e22", "#f39c12"),   # orange dim / bright
-    ("#e74c3c", "#ff6b6b"),   # red dim / bright
-]
-_pulse_pair_idx = 0
-
-
-def _pulse_tick() -> None:
-    global _pulse_after_id, _pulse_alpha, _pulse_alpha_dir, _pulse_pair_idx
-
-    if _pulse_after_id is None:
+def _tick_pulse(col):
+    global _pulse_id, _pulse_a, _pulse_dir
+    if not _pulse_id:
         return
+    _pulse_a += 0.07 * _pulse_dir
+    if _pulse_a >= 1: _pulse_a = 1; _pulse_dir = -1
+    elif _pulse_a <= 0: _pulse_a = 0; _pulse_dir = 1
+    dim = _darken(col, 0.35)
+    sb_dot.config(fg=_lerp_hex(dim, col, _pulse_a))
+    _pulse_id = root.after(35, lambda: _tick_pulse(col))
 
-    _pulse_alpha += 0.06 * _pulse_alpha_dir
-    if _pulse_alpha >= 1.0:
-        _pulse_alpha     = 1.0
-        _pulse_alpha_dir = -1
-    elif _pulse_alpha <= 0.0:
-        _pulse_alpha     = 0.0
-        _pulse_alpha_dir = 1
+def _darken(hex_col, amount):
+    r,g,b = int(hex_col[1:3],16),int(hex_col[3:5],16),int(hex_col[5:7],16)
+    return f"#{int(r*amount):02x}{int(g*amount):02x}{int(b*amount):02x}"
 
-    # Choose colour pair based on current dot colour
-    current_fg = mqtt_dot.cget("fg")
-    if current_fg in ("#e67e22", "#f39c12"):
-        dim, bright = "#e67e22", "#f39c12"
-    else:
-        dim, bright = "#c0392b", "#e74c3c"
+def _lerp_hex(c1, c2, t):
+    r1,g1,b1 = int(c1[1:3],16),int(c1[3:5],16),int(c1[5:7],16)
+    r2,g2,b2 = int(c2[1:3],16),int(c2[3:5],16),int(c2[5:7],16)
+    return f"#{int(r1+(r2-r1)*t):02x}{int(g1+(g2-g1)*t):02x}{int(b1+(b2-b1)*t):02x}"
 
-    # Lerp between dim and bright
-    colour = _lerp_hex(dim, bright, _pulse_alpha)
-    mqtt_dot.config(fg=colour)
+# ─────────────────────────────────────────────
+#  UI STATE HELPERS
+# ─────────────────────────────────────────────
+def _set_device_status(text, colour):
+    dev_status_dot.config(fg=colour)
+    dev_status_lbl.config(text=text, fg=colour)
 
-    _pulse_after_id = root.after(40, _pulse_tick)
+def _show_fw_version(version):
+    fw_var.set(f"v{version}")
+    fw_entry.config(fg=SUCCESS)
 
+def _lock_controls(locked):
+    s = tk.DISABLED if locked else tk.NORMAL
+    mac_entry.config(state=s)
+    check_btn.config(state=s)
+    file_btn.config(state=s)
 
-def _lerp_hex(c1: str, c2: str, t: float) -> str:
-    """Linear-interpolate between two #rrggbb colours."""
-    r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
-    r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
-    r = int(r1 + (r2 - r1) * t)
-    g = int(g1 + (g2 - g1) * t)
-    b = int(b1 + (b2 - b1) * t)
-    return f"#{r:02x}{g:02x}{b:02x}"
-
-
-# ================================================================
-#  GUI HELPERS
-# ================================================================
-
-def _update_status(text: str, colour: str = "#2c3e50") -> None:
-    status_label.config(text=text, fg=colour)
-
-
-def _update_progress(pct: int, done: int, total: int) -> None:
+def _update_progress(pct, done, total):
     progress_bar["value"] = pct
-    progress_label.config(text=f"Chunk {done} / {total}  ({pct}%)")
-
-
-def _set_controls_enabled(enabled: bool) -> None:
-    state = tk.NORMAL if enabled else tk.DISABLED
-    check_btn.config(state=state)
-    firmware_btn.config(state=state)
-    mac_entry.config(state=state)
-
-
-# ================================================================
-#  BUTTON CALLBACKS
-# ================================================================
-
-def cb_check_device() -> None:
-    global target_mac
-
-    if mqtt_client is None:
-        messagebox.showerror("Not Connected", "MQTT broker not connected yet. Please wait.")
-        return
-
-    mac = mac_entry.get().strip().upper()
-    if not mac:
-        messagebox.showerror("Missing MAC", "Please enter the ESP32 MAC ID.")
-        return
-
-    target_mac = mac
-    upload_btn.config(state=tk.DISABLED)
-
-    status_topic = f"{target_mac}/ota_status"
-    ack_topic    = f"{target_mac}/ota/ack"
-    check_topic  = f"{target_mac}/ota_check"
-
-    mqtt_client.subscribe(status_topic, qos=1)
-    mqtt_client.subscribe(ack_topic,    qos=1)
-    mqtt_client.publish(check_topic, "ARE_YOU_READY", qos=1)
-
-    print(f"[APP] Checking device: {target_mac}")
-    _update_status("Waiting for ESP32\u2026", "#7f8c8d")
-
-    progress_bar["value"] = 0
-    progress_label.config(text="")
-
-
-def cb_select_firmware() -> None:
-    global firmware_path
-
-    path = filedialog.askopenfilename(
-        title="Select ESP32 Firmware (.bin)",
-        filetypes=[("Firmware binary", "*.bin"), ("All files", "*.*")],
+    prog_left.config(text=f"Chunk  {done} / {total}")
+    prog_right.config(text=f"{pct}%")
+    prog_bar_lbl.config(
+        text="▓" * (pct // 5) + "░" * (20 - pct // 5),
     )
 
-    if path:
-        firmware_path = path
-        firmware_label.config(text=os.path.basename(path), fg="#27ae60")
-        print(f"[APP] Firmware selected: {path}")
+def _reset_progress():
+    progress_bar["value"] = 0
+    prog_left.config(text="")
+    prog_right.config(text="")
+    prog_bar_lbl.config(text="")
 
+# ─────────────────────────────────────────────
+#  BUTTON CALLBACKS
+# ─────────────────────────────────────────────
+def cb_check():
+    global target_mac
+    if not mqtt_client:
+        messagebox.showerror("Not Connected", "MQTT not ready — please wait.")
+        return
+    mac = mac_entry.get().strip().upper()
+    if not mac:
+        messagebox.showerror("Missing MAC", "Enter the ESP32 MAC address.")
+        return
+    target_mac = mac
+    fw_var.set("—")
+    fw_entry.config(fg=TEXT_DIM)
+    upload_btn.config(state=tk.DISABLED, bg=MUTED, cursor="")
+    _set_device_status("Querying device…", TEXT_SEC)
+    _reset_progress()
 
-def cb_upload_firmware() -> None:
+    mqtt_client.subscribe(f"{target_mac}/ota_status", qos=1)
+    mqtt_client.subscribe(f"{target_mac}/ota/ack",    qos=1)
+    mqtt_client.subscribe(f"{target_mac}/info",       qos=0)
+    mqtt_client.publish(f"{target_mac}/ota_check", "ARE_YOU_READY", qos=1)
+
+def cb_browse():
+    global firmware_path
+    p = filedialog.askopenfilename(
+        title="Select firmware binary",
+        filetypes=[("Firmware binary", "*.bin"), ("All files", "*.*")],
+    )
+    if p:
+        firmware_path = p
+        file_name_lbl.config(text=os.path.basename(p), fg=TEXT_PRI)
+        size_kb = os.path.getsize(p) / 1024
+        file_meta_lbl.config(text=f"{size_kb:.1f} KB", fg=TEXT_SEC)
+
+def cb_upload():
     if not target_mac:
-        messagebox.showerror("No Device", "Check a device first.")
+        messagebox.showerror("No Device", "Run 'Check Device' first.")
         return
     if not firmware_path:
-        messagebox.showerror("No Firmware", "Select a firmware file first.")
+        messagebox.showerror("No File", "Select a firmware file first.")
         return
+    _lock_controls(True)
+    upload_btn.config(state=tk.DISABLED, bg=MUTED, cursor="")
+    _reset_progress()
+    threading.Thread(target=_ota_worker, daemon=True).start()
 
-    _set_controls_enabled(False)
-    upload_btn.config(state=tk.DISABLED)
-    progress_bar["value"] = 0
-    progress_label.config(text="Starting\u2026")
-
-    t = threading.Thread(target=_upload_worker, daemon=True, name="OTA-Upload")
-    t.start()
-
-
-# ================================================================
-#  OTA UPLOAD WORKER
-# ================================================================
-
-def _upload_worker() -> None:
+# ─────────────────────────────────────────────
+#  OTA WORKER
+# ─────────────────────────────────────────────
+def _ota_worker():
     global current_chunk
-
     try:
         with open(firmware_path, "rb") as f:
-            firmware_data = f.read()
+            data = f.read()
+        total   = len(data)
+        chunks  = (total + CHUNK_SIZE - 1) // CHUNK_SIZE
+        crc     = zlib.crc32(data) & 0xFFFFFFFF
 
-        total_size   = len(firmware_data)
-        total_chunks = (total_size + CHUNK_SIZE - 1) // CHUNK_SIZE
-        crc32_val    = zlib.crc32(firmware_data) & 0xFFFFFFFF
-
-        print(f"[OTA] Size={total_size}B  Chunks={total_chunks}  CRC=0x{crc32_val:08X}")
-
-        begin_payload = json.dumps({
-            "size"  : total_size,
-            "chunks": total_chunks,
-            "crc32" : crc32_val,
-        })
-        mqtt_client.publish(f"{target_mac}/ota/begin", begin_payload, qos=1)
-        root.after(0, lambda: _update_status("OTA Started \u2014 sending chunks\u2026", "#2980b9"))
-
+        mqtt_client.publish(f"{target_mac}/ota/begin",
+            json.dumps({"size": total, "chunks": chunks, "crc32": crc}), qos=1)
+        root.after(0, lambda: _set_device_status("Transferring firmware…", ACCENT))
         time.sleep(0.3)
 
-        for i in range(total_chunks):
-            chunk_data = firmware_data[i * CHUNK_SIZE : (i + 1) * CHUNK_SIZE]
-            packet = struct.pack(">I", i) + chunk_data
-
-            retries = 0
-            success = False
-
-            while retries < MAX_RETRIES:
+        for i in range(chunks):
+            pkt = struct.pack(">I", i) + data[i*CHUNK_SIZE:(i+1)*CHUNK_SIZE]
+            ok  = False
+            for attempt in range(MAX_RETRIES):
                 with _ack_lock:
                     current_chunk = i
                     ack_event.clear()
-
-                mqtt_client.publish(f"{target_mac}/ota/chunk", packet, qos=1)
-
-                if ack_event.wait(timeout=ACK_TIMEOUT):
-                    success = True
-                    break
-                else:
-                    retries += 1
-                    print(f"[OTA] Chunk {i} timeout — retry {retries}/{MAX_RETRIES}")
-
-            if not success:
-                root.after(0, lambda ci=i: _update_status(
-                    f"FAILED: no ACK for chunk {ci}", "#e74c3c"
-                ))
-                root.after(0, lambda: _set_controls_enabled(True))
+                mqtt_client.publish(f"{target_mac}/ota/chunk", pkt, qos=1)
+                if ack_event.wait(ACK_TIMEOUT):
+                    ok = True; break
+                print(f"[OTA] chunk {i} retry {attempt+1}")
+            if not ok:
+                root.after(0, lambda ci=i: _set_device_status(
+                    f"FAILED — no ACK on chunk {ci}", DANGER))
+                root.after(0, lambda: _lock_controls(False))
                 return
-
-            pct = int(((i + 1) / total_chunks) * 100)
-            root.after(0, lambda p=pct, ci=i + 1, ct=total_chunks:
+            pct = int((i+1)/chunks*100)
+            root.after(0, lambda p=pct, ci=i+1, ct=chunks:
                 _update_progress(p, ci, ct))
 
         mqtt_client.publish(f"{target_mac}/ota/end", "END", qos=1)
-        root.after(0, lambda: _update_status(
-            "All chunks sent \u2014 waiting for ESP32 to verify\u2026", "#27ae60"
-        ))
+        root.after(0, lambda: _set_device_status(
+            "Verifying — waiting for ESP32…", SUCCESS))
 
     except FileNotFoundError:
-        root.after(0, lambda: _update_status("ERROR: Firmware file not found", "#e74c3c"))
-        root.after(0, lambda: _set_controls_enabled(True))
+        root.after(0, lambda: _set_device_status("File not found", DANGER))
+        root.after(0, lambda: _lock_controls(False))
+    except Exception as e:
+        root.after(0, lambda e=str(e): _set_device_status(f"Error: {e}", DANGER))
+        root.after(0, lambda: _lock_controls(False))
 
-    except Exception as exc:
-        print(f"[OTA] Exception: {exc}")
-        root.after(0, lambda e=str(exc): _update_status(f"ERROR: {e}", "#e74c3c"))
-        root.after(0, lambda: _set_controls_enabled(True))
+# ─────────────────────────────────────────────
+#  WIDGET FACTORIES
+# ─────────────────────────────────────────────
+def section_header(parent, text):
+    """Uppercase section label with left accent bar."""
+    row = tk.Frame(parent, bg=PANEL_BG)
+    row.pack(fill=tk.X, pady=(0, 10))
+    tk.Frame(row, bg=ACCENT, width=3).pack(side=tk.LEFT, fill=tk.Y)
+    tk.Label(row, text=f"  {text}",
+             font=(FONT_MONO, 8, "bold"),
+             bg=PANEL_BG, fg=TEXT_SEC,
+             anchor="w").pack(side=tk.LEFT, fill=tk.Y, pady=6)
 
 
-# ================================================================
-#  GUI LAYOUT
-# ================================================================
+def field_label(parent, text, bg=None):
+    bg = bg or PANEL_BG
+    tk.Label(parent, text=text,
+             font=(FONT_UI, 9),
+             bg=bg, fg=TEXT_SEC, anchor="w").pack(fill=tk.X, pady=(0, 4))
 
-def _build_gui() -> tk.Tk:
+
+def styled_entry(parent, width=28, **kw):
+    e = tk.Entry(parent,
+                 font=(FONT_MONO, 11),
+                 bg=INPUT_BG, fg=TEXT_PRI,
+                 insertbackground=TEXT_PRI,
+                 relief=tk.FLAT, bd=0,
+                 highlightthickness=1,
+                 highlightbackground=INPUT_BD,
+                 highlightcolor=INPUT_FOCUS,
+                 width=width, **kw)
+    return e
+
+
+def readonly_field(parent, textvariable, width=18):
+    e = tk.Entry(parent,
+                 textvariable=textvariable,
+                 font=(FONT_MONO, 11, "bold"),
+                 bg=INPUT_BG, fg=TEXT_DIM,
+                 relief=tk.FLAT, bd=0,
+                 highlightthickness=1,
+                 highlightbackground=INPUT_BD,
+                 width=width,
+                 state="readonly",
+                 readonlybackground=INPUT_BG,
+                 cursor="arrow")
+    return e
+
+
+def primary_btn(parent, text, command, bg=ACCENT, fg="white", **kw):
+    b = tk.Button(parent, text=text,
+                  font=(FONT_UI, 10, "bold"),
+                  bg=bg, fg=fg,
+                  activebackground=ACCENT_HOV, activeforeground="white",
+                  relief=tk.FLAT, bd=0,
+                  highlightthickness=0,
+                  padx=20, pady=8,
+                  cursor="hand2",
+                  command=command, **kw)
+    # Hover effect
+    b.bind("<Enter>", lambda e, b=b, hov=ACCENT_HOV if bg==ACCENT else SUCCESS_HOV:
+           b.config(bg=hov) if b["state"] != tk.DISABLED else None)
+    b.bind("<Leave>", lambda e, b=b, orig=bg:
+           b.config(bg=orig) if b["state"] != tk.DISABLED else None)
+    return b
+
+
+def ghost_btn(parent, text, command):
+    b = tk.Button(parent, text=text,
+                  font=(FONT_UI, 10),
+                  bg=CARD_BG, fg=TEXT_SEC,
+                  activebackground=INPUT_BD, activeforeground=TEXT_PRI,
+                  relief=tk.FLAT, bd=0,
+                  highlightthickness=1,
+                  highlightbackground=CARD_BORDER,
+                  padx=16, pady=8,
+                  cursor="hand2",
+                  command=command)
+    b.bind("<Enter>", lambda e: b.config(fg=TEXT_PRI))
+    b.bind("<Leave>", lambda e: b.config(fg=TEXT_SEC))
+    return b
+
+
+def divider(parent, bg=PANEL_BG):
+    tk.Frame(parent, bg=CARD_BORDER, height=1).pack(fill=tk.X, pady=14)
+
+
+def info_row(parent, label, value_var, value_fg=TEXT_DIM):
+    """A label-value pair on one row, returns the value Entry."""
+    row = tk.Frame(parent, bg=PANEL_BG)
+    row.pack(fill=tk.X, pady=4)
+    tk.Label(row, text=label,
+             font=(FONT_UI, 9),
+             bg=PANEL_BG, fg=TEXT_SEC,
+             width=20, anchor="w").pack(side=tk.LEFT)
+    e = readonly_field(row, value_var, width=20)
+    e.pack(side=tk.LEFT, ipady=5, ipadx=8)
+    return e
+
+# ─────────────────────────────────────────────
+#  GUI BUILD
+# ─────────────────────────────────────────────
+def build_gui():
     win = tk.Tk()
-    win.title("ESP32 OTA Upgrader — MQTT Only")
-    win.geometry("520x510")
+    win.title("ESP32 OTA Upgrader")
+    win.geometry("700x640")
     win.resizable(False, False)
-    win.configure(bg="#1c2333")
+    win.configure(bg=BG)
 
-    font_title  = ("Consolas", 15, "bold")
-    font_label  = ("Consolas", 10)
-    font_entry  = ("Consolas", 11)
-    font_status = ("Consolas", 11, "bold")
-    font_btn    = ("Consolas", 10, "bold")
-    font_dot    = ("Consolas", 16, "bold")
-    font_mqtt   = ("Consolas", 9)
+    # ══════════════════════════════════════════
+    #  TITLEBAR
+    # ══════════════════════════════════════════
+    tb = tk.Frame(win, bg=BG, height=56)
+    tb.pack(fill=tk.X)
+    tb.pack_propagate(False)
 
-    BG       = "#1c2333"
-    FG       = "#ecf0f1"
-    ACCENT   = "#3498db"
-    BTN_BG   = "#2c3e50"
-    BTN_FG   = "#ecf0f1"
-    ENTRY_BG = "#2c3e50"
+    # Left: logo area
+    logo = tk.Frame(tb, bg=ACCENT, width=56, height=56)
+    logo.pack(side=tk.LEFT)
+    logo.pack_propagate(False)
+    tk.Label(logo, text="⬡", font=(FONT_MONO, 20, "bold"),
+             bg=ACCENT, fg="white").place(relx=0.5, rely=0.5, anchor="center")
 
-    # ── Title bar ───────────────────────────────────────────────
-    title_frame = tk.Frame(win, bg=ACCENT, height=46)
-    title_frame.pack(fill=tk.X)
-    tk.Label(
-        title_frame,
-        text="  \u2b21  ESP32 OTA Upgrader \u2014 MQTT Only",
-        font=font_title, bg=ACCENT, fg="white", anchor="w",
-    ).pack(side=tk.LEFT, padx=12, pady=10)
+    tk.Label(tb, text="ESP32 OTA Upgrader",
+             font=(FONT_UI, 13, "bold"),
+             bg=BG, fg=TEXT_PRI, anchor="w").pack(side=tk.LEFT, padx=14)
 
-    # ── MQTT Status bar (just below title) ──────────────────────
-    mqtt_bar = tk.Frame(win, bg="#111827", height=28)
-    mqtt_bar.pack(fill=tk.X)
-    mqtt_bar.pack_propagate(False)
+    tk.Label(tb, text="MQTT  ONLY",
+             font=(FONT_MONO, 8, "bold"),
+             bg=BG, fg=TEXT_DIM, anchor="e").pack(side=tk.RIGHT, padx=18)
 
-    global mqtt_dot, mqtt_status_lbl
-    mqtt_dot = tk.Label(
-        mqtt_bar,
-        text="\u25cf",          # filled circle
-        font=font_dot,
-        bg="#111827", fg="#4b5563",
-        padx=8, pady=0,
-    )
-    mqtt_dot.pack(side=tk.LEFT)
+    # ══════════════════════════════════════════
+    #  STATUSBAR  (thin strip at very bottom)
+    # ══════════════════════════════════════════
+    statusbar = tk.Frame(win, bg=SIDEBAR_BG, height=26)
+    statusbar.pack(side=tk.BOTTOM, fill=tk.X)
+    statusbar.pack_propagate(False)
 
-    mqtt_status_lbl = tk.Label(
-        mqtt_bar,
-        text="MQTT: Initialising…",
-        font=font_mqtt,
-        bg="#111827", fg="#4b5563",
-        anchor="w",
-    )
-    mqtt_status_lbl.pack(side=tk.LEFT, pady=4)
+    global sb_dot, sb_text
+    sb_dot = tk.Label(statusbar, text="●",
+                      font=(FONT_MONO, 11),
+                      bg=SIDEBAR_BG, fg=TEXT_DIM, padx=10)
+    sb_dot.pack(side=tk.LEFT)
 
-    # ── Body ────────────────────────────────────────────────────
-    body = tk.Frame(win, bg=BG, padx=30, pady=20)
+    sb_text = tk.Label(statusbar, text="Initialising…",
+                       font=(FONT_MONO, 9),
+                       bg=SIDEBAR_BG, fg=TEXT_DIM, anchor="w")
+    sb_text.pack(side=tk.LEFT)
+
+    tk.Label(statusbar,
+             text=f"chunk {CHUNK_SIZE} B  ·  ack {ACK_TIMEOUT} s  ·  retries {MAX_RETRIES}",
+             font=(FONT_MONO, 8),
+             bg=SIDEBAR_BG, fg=TEXT_DIM, anchor="e").pack(side=tk.RIGHT, padx=12)
+
+    # ══════════════════════════════════════════
+    #  BODY  =  SIDEBAR  +  MAIN PANEL
+    # ══════════════════════════════════════════
+    body = tk.Frame(win, bg=BG)
     body.pack(fill=tk.BOTH, expand=True)
 
-    tk.Label(body, text="ESP32 MAC ID", font=font_label, bg=BG, fg=FG, anchor="w")\
-        .pack(fill=tk.X, pady=(0, 4))
+    # ── SIDEBAR (left, 180 px) ─────────────────
+    sidebar = tk.Frame(body, bg=SIDEBAR_BG, width=180)
+    sidebar.pack(side=tk.LEFT, fill=tk.Y)
+    sidebar.pack_propagate(False)
 
-    mac_row = tk.Frame(body, bg=BG)
-    mac_row.pack(fill=tk.X, pady=(0, 10))
+    tk.Frame(sidebar, bg=CARD_BORDER, height=1).pack(fill=tk.X)   # top rule
+
+    def nav_item(icon, label, active=False):
+        bg  = ACCENT if active else SIDEBAR_BG
+        fg  = "white" if active else TEXT_SEC
+        row = tk.Frame(sidebar, bg=bg, cursor="hand2")
+        row.pack(fill=tk.X)
+        tk.Frame(row, bg=ACCENT if active else "transparent",
+                 width=3).pack(side=tk.LEFT, fill=tk.Y)
+        tk.Label(row, text=f"  {icon}  {label}",
+                 font=(FONT_UI, 10, "bold" if active else "normal"),
+                 bg=bg, fg=fg, anchor="w",
+                 pady=12).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        return row
+
+    nav_item("⬡", "OTA Flash", active=True)
+    nav_item("◈", "Device Info")
+    nav_item("≡", "Logs")
+    nav_item("⚙", "Settings")
+
+    tk.Frame(sidebar, bg=CARD_BORDER, height=1).pack(fill=tk.X, pady=(12, 0))
+
+    # Sidebar info block
+    tk.Label(sidebar, text="BROKER",
+             font=(FONT_MONO, 7, "bold"),
+             bg=SIDEBAR_BG, fg=TEXT_DIM, anchor="w").pack(fill=tk.X, padx=14, pady=(12,2))
+    tk.Label(sidebar, text=MQTT_BROKER,
+             font=(FONT_MONO, 8),
+             bg=SIDEBAR_BG, fg=TEXT_SEC, anchor="w",
+             wraplength=150).pack(fill=tk.X, padx=14)
+
+    tk.Label(sidebar, text="PORT",
+             font=(FONT_MONO, 7, "bold"),
+             bg=SIDEBAR_BG, fg=TEXT_DIM, anchor="w").pack(fill=tk.X, padx=14, pady=(10,2))
+    tk.Label(sidebar, text=str(MQTT_PORT),
+             font=(FONT_MONO, 8),
+             bg=SIDEBAR_BG, fg=TEXT_SEC, anchor="w").pack(fill=tk.X, padx=14)
+
+    # ── MAIN PANEL (right) ─────────────────────
+    main = tk.Frame(body, bg=PANEL_BG)
+    main.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    tk.Frame(main, bg=CARD_BORDER, height=1).pack(fill=tk.X)
+
+    scroll_canvas = tk.Canvas(main, bg=PANEL_BG, bd=0,
+                              highlightthickness=0)
+    scroll_canvas.pack(fill=tk.BOTH, expand=True)
+
+    content = tk.Frame(scroll_canvas, bg=PANEL_BG)
+    scroll_canvas.create_window((0, 0), window=content, anchor="nw")
+
+    pad = tk.Frame(content, bg=PANEL_BG)
+    pad.pack(fill=tk.BOTH, expand=True, padx=28, pady=22)
+
+    # ══════════════════════════════════════════
+    #  SECTION 1 — DEVICE
+    # ══════════════════════════════════════════
+    section_header(pad, "DEVICE")
+
+    # MAC row
+    field_label(pad, "MAC Address")
+    mac_row = tk.Frame(pad, bg=PANEL_BG)
+    mac_row.pack(fill=tk.X, pady=(0, 16))
 
     global mac_entry, check_btn
-    mac_entry = tk.Entry(
-        mac_row, width=26,
-        font=font_entry, bg=ENTRY_BG, fg=FG,
-        insertbackground=FG, relief=tk.FLAT, bd=6,
-    )
-    mac_entry.pack(side=tk.LEFT, padx=(0, 10))
+    mac_entry = styled_entry(mac_row, width=22)
+    mac_entry.pack(side=tk.LEFT, ipady=7, ipadx=6, padx=(0, 10))
     mac_entry.insert(0, "0CF73625BF58")
 
-    check_btn = tk.Button(
-        mac_row, text="Check Device",
-        font=font_btn, bg=ACCENT, fg="white",
-        relief=tk.FLAT, padx=12, pady=4,
-        cursor="hand2", command=cb_check_device,
-    )
+    check_btn = primary_btn(mac_row, "  Check Device  ", cb_check)
     check_btn.pack(side=tk.LEFT)
 
-    ttk.Separator(body, orient="horizontal").pack(fill=tk.X, pady=10)
+    # Device info grid
+    info_grid = tk.Frame(pad, bg=PANEL_BG)
+    info_grid.pack(fill=tk.X, pady=(0, 4))
 
-    global status_label
-    status_label = tk.Label(
-        body, text="Device Not Checked",
-        font=font_status, bg=BG, fg="#7f8c8d", anchor="w",
-    )
-    status_label.pack(fill=tk.X, pady=(0, 8))
+    global fw_var, fw_entry
+    fw_var   = tk.StringVar(value="—")
+    fw_entry = info_row(info_grid, "Firmware Version", fw_var)
 
-    global progress_bar, progress_label
-    progress_label = tk.Label(
-        body, text="",
-        font=font_label, bg=BG, fg=FG, anchor="w",
-    )
-    progress_label.pack(fill=tk.X, pady=(0, 4))
+    # Device status badge
+    status_row = tk.Frame(pad, bg=PANEL_BG)
+    status_row.pack(fill=tk.X, pady=(8, 0))
 
+    global dev_status_dot, dev_status_lbl
+    dev_status_dot = tk.Label(status_row, text="●",
+                              font=(FONT_MONO, 12),
+                              bg=PANEL_BG, fg=TEXT_DIM)
+    dev_status_dot.pack(side=tk.LEFT)
+
+    dev_status_lbl = tk.Label(status_row, text="Not checked",
+                              font=(FONT_UI, 10, "bold"),
+                              bg=PANEL_BG, fg=TEXT_DIM, anchor="w")
+    dev_status_lbl.pack(side=tk.LEFT, padx=8)
+
+    divider(pad)
+
+    # ══════════════════════════════════════════
+    #  SECTION 2 — FIRMWARE FILE
+    # ══════════════════════════════════════════
+    section_header(pad, "FIRMWARE FILE")
+
+    file_card = tk.Frame(pad, bg=CARD_BG,
+                         highlightthickness=1,
+                         highlightbackground=CARD_BORDER)
+    file_card.pack(fill=tk.X, pady=(0, 16))
+
+    file_inner = tk.Frame(file_card, bg=CARD_BG, padx=16, pady=12)
+    file_inner.pack(fill=tk.X)
+
+    file_top = tk.Frame(file_inner, bg=CARD_BG)
+    file_top.pack(fill=tk.X)
+
+    # File icon + labels
+    file_icon = tk.Label(file_top, text="📦",
+                         font=(FONT_UI, 20),
+                         bg=CARD_BG, fg=TEXT_SEC)
+    file_icon.pack(side=tk.LEFT, padx=(0, 12))
+
+    file_text = tk.Frame(file_top, bg=CARD_BG)
+    file_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+    global file_name_lbl, file_meta_lbl
+    file_name_lbl = tk.Label(file_text, text="No file selected",
+                             font=(FONT_UI, 10, "bold"),
+                             bg=CARD_BG, fg=TEXT_DIM, anchor="w")
+    file_name_lbl.pack(fill=tk.X)
+
+    file_meta_lbl = tk.Label(file_text, text="Choose a .bin firmware binary",
+                             font=(FONT_UI, 9),
+                             bg=CARD_BG, fg=TEXT_DIM, anchor="w")
+    file_meta_lbl.pack(fill=tk.X)
+
+    global file_btn
+    file_btn = ghost_btn(file_top, "  Browse…  ", cb_browse)
+    file_btn.pack(side=tk.RIGHT)
+
+    divider(pad)
+
+    # ══════════════════════════════════════════
+    #  SECTION 3 — TRANSFER
+    # ══════════════════════════════════════════
+    section_header(pad, "TRANSFER")
+
+    # Progress header
+    prog_header = tk.Frame(pad, bg=PANEL_BG)
+    prog_header.pack(fill=tk.X, pady=(0, 6))
+
+    global prog_left, prog_right
+    prog_left  = tk.Label(prog_header, text="",
+                          font=(FONT_MONO, 9),
+                          bg=PANEL_BG, fg=TEXT_SEC, anchor="w")
+    prog_left.pack(side=tk.LEFT)
+
+    prog_right = tk.Label(prog_header, text="",
+                          font=(FONT_MONO, 9, "bold"),
+                          bg=PANEL_BG, fg=TEXT_PRI, anchor="e")
+    prog_right.pack(side=tk.RIGHT)
+
+    # Progress bar
     style = ttk.Style()
     style.theme_use("default")
-    style.configure(
-        "OTA.Horizontal.TProgressbar",
-        troughcolor="#2c3e50",
-        background="#27ae60",
-        thickness=14,
-    )
-    progress_bar = ttk.Progressbar(
-        body, orient="horizontal",
-        length=440, mode="determinate",
-        style="OTA.Horizontal.TProgressbar",
-    )
-    progress_bar.pack(fill=tk.X, pady=(0, 10))
+    style.configure("OTA.Horizontal.TProgressbar",
+                    troughcolor=INPUT_BG,
+                    background=ACCENT,
+                    thickness=6, borderwidth=0)
+    global progress_bar
+    progress_bar = ttk.Progressbar(pad, orient="horizontal",
+                                   mode="determinate",
+                                   style="OTA.Horizontal.TProgressbar")
+    progress_bar.pack(fill=tk.X, pady=(0, 6))
 
-    ttk.Separator(body, orient="horizontal").pack(fill=tk.X, pady=6)
+    # ASCII progress label
+    global prog_bar_lbl
+    prog_bar_lbl = tk.Label(pad, text="",
+                            font=(FONT_MONO, 8),
+                            bg=PANEL_BG, fg=TEXT_DIM, anchor="w")
+    prog_bar_lbl.pack(fill=tk.X, pady=(0, 16))
 
-    fw_row = tk.Frame(body, bg=BG)
-    fw_row.pack(fill=tk.X, pady=(8, 4))
-
-    global firmware_btn, firmware_label
-    firmware_btn = tk.Button(
-        fw_row, text="Select Firmware",
-        font=font_btn, bg=BTN_BG, fg=BTN_FG,
-        relief=tk.FLAT, padx=12, pady=4,
-        cursor="hand2", command=cb_select_firmware,
-    )
-    firmware_btn.pack(side=tk.LEFT, padx=(0, 14))
-
-    firmware_label = tk.Label(
-        fw_row, text="No firmware selected",
-        font=font_label, bg=BG, fg="#7f8c8d", anchor="w",
-    )
-    firmware_label.pack(side=tk.LEFT)
-
+    # Upload button — full width
     global upload_btn
-    upload_btn = tk.Button(
-        body,
-        text="\u2b06  Upload Firmware via MQTT",
-        font=font_btn, bg="#27ae60", fg="white",
-        relief=tk.FLAT, padx=16, pady=8,
-        cursor="hand2", state=tk.DISABLED,
-        command=cb_upload_firmware,
-    )
-    upload_btn.pack(pady=18)
-
-    tk.Label(
-        win,
-        text=f"Chunk: {CHUNK_SIZE}B   |   ACK timeout: {ACK_TIMEOUT}s   |   Max retries: {MAX_RETRIES}",
-        font=("Consolas", 8),
-        bg="#111827", fg="#4b5563",
-    ).pack(fill=tk.X, side=tk.BOTTOM, pady=4)
+    upload_btn = tk.Button(pad,
+                           text="⬆    Upload Firmware via MQTT",
+                           font=(FONT_UI, 11, "bold"),
+                           bg=MUTED, fg=TEXT_DIM,
+                           activebackground=SUCCESS_HOV, activeforeground="white",
+                           relief=tk.FLAT, bd=0,
+                           highlightthickness=0,
+                           pady=13, cursor="",
+                           state=tk.DISABLED,
+                           command=cb_upload)
+    upload_btn.pack(fill=tk.X)
 
     return win
 
-
-# ================================================================
+# ─────────────────────────────────────────────
 #  ENTRY POINT
-# ================================================================
-
+# ─────────────────────────────────────────────
 if __name__ == "__main__":
-    # 1. Build GUI first — window appears immediately
-    root = _build_gui()
-
-    # 2. Connect MQTT in background — status bar updates live
-    root.after(100, _connect_mqtt)
-
+    root = build_gui()
+    root.after(200, _connect_mqtt)
     root.mainloop()
-
     if mqtt_client:
         mqtt_client.loop_stop()
         mqtt_client.disconnect()

@@ -32,6 +32,21 @@ void handleOtaEnd();
 // Routes MQTT messages to the matching OTA handlers.
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 
+// Initializes relay, button, and RGB GPIO hardware.
+void initializeHomeAutomation();
+
+// Subscribes to relay and RGB MQTT command topics.
+void subscribeHomeAutomationTopics();
+
+// Publishes retained relay and RGB state after MQTT connects.
+void publishHomeAutomationState();
+
+// Routes relay and RGB MQTT messages to automation handlers.
+bool handleHomeAutomationMessage(const String& topic, byte* payload, unsigned int length);
+
+// Handles button events and debounce processing.
+void processHomeAutomation();
+
 // Connects to MQTT and subscribes to OTA topics.
 void connectMQTT();
 

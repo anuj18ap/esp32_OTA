@@ -74,6 +74,10 @@ void connectMQTT()
             mqttClient.subscribe(topicOTABegin.c_str(), 1);
             mqttClient.subscribe(topicOTAChunk.c_str(), 1);
             mqttClient.subscribe(topicOTAEnd.c_str(), 1);
+            // Subscribes to home automation command topics after MQTT reconnects.
+            subscribeHomeAutomationTopics();
+            // Publishes retained relay and RGB states for MQTT dashboard sync.
+            publishHomeAutomationState();
             Serial.println("[MQTT] Subscribed.");
         }
         else

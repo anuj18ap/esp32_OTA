@@ -12,7 +12,9 @@ return-type void
 ************************************************************/
 void publishStatus(const char* status)
 {
+    // Sends the current OTA state to the uploader.
     mqttClient.publish(topicOTAStatus.c_str(), status, false);
+    // Flushes MQTT immediately so status is not delayed by the main loop.
     mqttClient.loop();
     Serial.printf("[MQTT] Status -> %s\n", status);
 }
@@ -25,9 +27,12 @@ return-type void
 ************************************************************/
 void publishAck(uint32_t chunkIndex)
 {
+    // Converts the chunk index into text for the ACK payload.
     char buffer[12];
     snprintf(buffer, sizeof(buffer), "%u", chunkIndex);
+    // Publishes the ACK so the uploader can send the next chunk.
     mqttClient.publish(topicOTAAck.c_str(), buffer, false);
+    // Flushes MQTT immediately to keep the chunk transfer moving.
     mqttClient.loop();
 }
 
@@ -93,6 +98,7 @@ void handleOtaChunk(const uint8_t* payload, unsigned int len)
     if (otaState != OTA_RECEIVING)
         return;
 
+    // Rejects packets that cannot contain the 4-byte index plus data.
     if (len < 5)
     {
         Serial.println("[OTA] Chunk too short.");
@@ -113,6 +119,7 @@ void handleOtaChunk(const uint8_t* payload, unsigned int len)
         return;
     }
 
+    // Points past the 4-byte chunk index to the firmware bytes.
     const uint8_t* chunkData = payload + 4;
     unsigned int   chunkLen  = len - 4;
 
@@ -132,10 +139,12 @@ void handleOtaChunk(const uint8_t* payload, unsigned int len)
         return;
     }
 
+    // Stores progress after a successful flash write.
     lastChunkIndex = chunkIndex;
     chunksReceived++;
     publishAck(chunkIndex);
 
+    // Prints progress every 20 chunks and on the final chunk.
     if (chunkIndex % 20 == 0 || chunkIndex == expectedChunks - 1)
     {
         uint8_t pct = (uint8_t)((chunksReceived * 100UL) / expectedChunks);
@@ -206,26 +215,39 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
 
     if (currentTopic == topicOTACheck)
     {
+        // Answers the uploader readiness probe before OTA begins.
         Serial.println("[MQTT] CHECK -> READY");
         publishStatus("READY");
+        publishDeviceInfo();
         return;
     }
 
     if (currentTopic == topicOTABegin)
     {
+        // Starts OTA when metadata arrives from the uploader.
         handleOtaBegin(payload, length);
         return;
     }
 
     if (currentTopic == topicOTAChunk)
     {
+        // Writes each binary OTA chunk to the update partition.
         handleOtaChunk(payload, length);
         return;
     }
 
     if (currentTopic == topicOTAEnd)
     {
+        // Finalizes OTA after the uploader sends the end command.
         handleOtaEnd();
         return;
     }
+
+    // Gives non-OTA topics to the relay and RGB automation handler.
+    if (handleHomeAutomationMessage(currentTopic, payload, length))
+    {
+        return;
+    }
+
+    Serial.println("[MQTT] Unhandled topic: " + currentTopic);
 }
