@@ -4,7 +4,7 @@
 #include <WiFi.h>
 
 // ── MUST be defined before PubSubClient is included ──────────────────────────
-#define MQTT_MAX_PACKET_SIZE 4096 // PubSubClient packet limit for OTA chunks.
+#define MQTT_MAX_PACKET_SIZE 8192 // PubSubClient packet limit for faster OTA chunks.
 #include <PubSubClient.h>
 
 enum OtaState { OTA_IDLE, OTA_RECEIVING }; // OTA receiver state machine values.

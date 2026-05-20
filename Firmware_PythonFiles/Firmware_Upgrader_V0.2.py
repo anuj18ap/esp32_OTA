@@ -15,11 +15,15 @@ import paho.mqtt.client as mqtt
 # ─────────────────────────────────────────────
 #  CONFIG
 # ─────────────────────────────────────────────
+APP_VERSION = 0.2
 MQTT_BROKER = "broker.emqx.io"
 MQTT_PORT   = 1883
-CHUNK_SIZE  = 3072
-ACK_TIMEOUT = 5
-MAX_RETRIES = 3
+CHUNK_SIZE  = 7168  # Larger chunks reduce MQTT round trips and speed up OTA.
+ACK_TIMEOUT = 3     # Shorter timeout detects a missed chunk ACK faster.
+MAX_RETRIES = 3     # Retries keep QoS 0 chunk transfer reliable.
+CHUNK_QOS   = 0     # Chunk data uses custom ACK/retry instead of MQTT QoS 1.
+COMMAND_QOS = 1     # Begin, end, and readiness commands stay QoS 1.
+BEGIN_DELAY = 0.1   # Small pause lets ESP32 enter Update.begin() before chunks.
 
 # ─────────────────────────────────────────────
 #  DESIGN TOKENS
@@ -45,8 +49,8 @@ TEXT_PRI    = "#f1f5f9"   # headings
 TEXT_SEC    = "#94a3b8"   # labels
 TEXT_DIM    = "#4b5563"   # placeholders
 
-FONT_MONO   = "Courier New"
-FONT_UI     = "Segoe UI" if os.name == "nt" else "TkDefaultFont"
+FONT_MONO   = "Trebuchet MS"
+FONT_UI     = "Trebuchet MS" if os.name == "nt" else "TkDefaultFont"
 
 # ─────────────────────────────────────────────
 #  STATE
@@ -239,7 +243,7 @@ def cb_check():
     mqtt_client.subscribe(f"{target_mac}/ota_status", qos=1)
     mqtt_client.subscribe(f"{target_mac}/ota/ack",    qos=1)
     mqtt_client.subscribe(f"{target_mac}/info",       qos=0)
-    mqtt_client.publish(f"{target_mac}/ota_check", "ARE_YOU_READY", qos=1)
+    mqtt_client.publish(f"{target_mac}/ota_check", "ARE_YOU_READY", qos=COMMAND_QOS)
 
 def cb_browse():
     global firmware_path
@@ -278,9 +282,9 @@ def _ota_worker():
         crc     = zlib.crc32(data) & 0xFFFFFFFF
 
         mqtt_client.publish(f"{target_mac}/ota/begin",
-            json.dumps({"size": total, "chunks": chunks, "crc32": crc}), qos=1)
+            json.dumps({"size": total, "chunks": chunks, "crc32": crc}), qos=COMMAND_QOS)
         root.after(0, lambda: _set_device_status("Transferring firmware…", ACCENT))
-        time.sleep(0.3)
+        time.sleep(BEGIN_DELAY)
 
         for i in range(chunks):
             pkt = struct.pack(">I", i) + data[i*CHUNK_SIZE:(i+1)*CHUNK_SIZE]
@@ -289,7 +293,7 @@ def _ota_worker():
                 with _ack_lock:
                     current_chunk = i
                     ack_event.clear()
-                mqtt_client.publish(f"{target_mac}/ota/chunk", pkt, qos=1)
+                mqtt_client.publish(f"{target_mac}/ota/chunk", pkt, qos=CHUNK_QOS)
                 if ack_event.wait(ACK_TIMEOUT):
                     ok = True; break
                 print(f"[OTA] chunk {i} retry {attempt+1}")
@@ -302,7 +306,7 @@ def _ota_worker():
             root.after(0, lambda p=pct, ci=i+1, ct=chunks:
                 _update_progress(p, ci, ct))
 
-        mqtt_client.publish(f"{target_mac}/ota/end", "END", qos=1)
+        mqtt_client.publish(f"{target_mac}/ota/end", "END", qos=COMMAND_QOS)
         root.after(0, lambda: _set_device_status(
             "Verifying — waiting for ESP32…", SUCCESS))
 
@@ -417,7 +421,7 @@ def info_row(parent, label, value_var, value_fg=TEXT_DIM):
 # ─────────────────────────────────────────────
 def build_gui():
     win = tk.Tk()
-    win.title("ESP32 OTA Upgrader")
+    win.title("AceTech ESP32 OTA-FU")
     win.geometry("700x640")
     win.resizable(False, False)
     win.configure(bg=BG)
@@ -436,11 +440,11 @@ def build_gui():
     tk.Label(logo, text="⬡", font=(FONT_MONO, 20, "bold"),
              bg=ACCENT, fg="white").place(relx=0.5, rely=0.5, anchor="center")
 
-    tk.Label(tb, text="ESP32 OTA Upgrader",
+    tk.Label(tb, text="AceTech ESP32 OTA-FU",
              font=(FONT_UI, 13, "bold"),
              bg=BG, fg=TEXT_PRI, anchor="w").pack(side=tk.LEFT, padx=14)
 
-    tk.Label(tb, text="MQTT  ONLY",
+    tk.Label(tb, text=f"MQTT ONLY v{APP_VERSION}",
              font=(FONT_MONO, 8, "bold"),
              bg=BG, fg=TEXT_DIM, anchor="e").pack(side=tk.RIGHT, padx=18)
 
@@ -485,7 +489,7 @@ def build_gui():
         fg  = "white" if active else TEXT_SEC
         row = tk.Frame(sidebar, bg=bg, cursor="hand2")
         row.pack(fill=tk.X)
-        tk.Frame(row, bg=ACCENT if active else "transparent",
+        tk.Frame(row, bg=ACCENT if active else SIDEBAR_BG,
                  width=3).pack(side=tk.LEFT, fill=tk.Y)
         tk.Label(row, text=f"  {icon}  {label}",
                  font=(FONT_UI, 10, "bold" if active else "normal"),

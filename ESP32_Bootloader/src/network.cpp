@@ -72,7 +72,8 @@ void connectMQTT()
             // Subscribes to the OTA handshake, metadata, chunk, and end topics.
             mqttClient.subscribe(topicOTACheck.c_str(), 1);
             mqttClient.subscribe(topicOTABegin.c_str(), 1);
-            mqttClient.subscribe(topicOTAChunk.c_str(), 1);
+            // Uses QoS 0 for OTA chunks because the custom ACK/retry handles reliability faster.
+            mqttClient.subscribe(topicOTAChunk.c_str(), 0);
             mqttClient.subscribe(topicOTAEnd.c_str(), 1);
             // Subscribes to home automation command topics after MQTT reconnects.
             subscribeHomeAutomationTopics();
