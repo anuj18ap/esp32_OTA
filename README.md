@@ -1,7 +1,7 @@
 # ESP32 Home Automation MQTT OTA Firmware
 
 ![Platform](https://img.shields.io/badge/Platform-ESP32--WROOM--32E-blue.svg)
-![Application](https://img.shields.io/badge/Application-v0.2-green.svg)
+![Application](https://img.shields.io/badge/Application-v0.3-green.svg)
 ![Uploader](https://img.shields.io/badge/Uploader-v0.2-brightgreen.svg)
 ![Framework](https://img.shields.io/badge/Framework-Arduino-00979D.svg)
 ![Build](https://img.shields.io/badge/Build-PlatformIO-orange.svg)
@@ -16,6 +16,14 @@ This project combines ESP32 home automation control with MQTT OTA firmware updat
 The ESP32 connects to Wi-Fi, connects to the configured MQTT broker, subscribes to automation and OTA topics, publishes retained relay/RGB status, receives a PlatformIO-generated `.bin` file in chunks during OTA, verifies CRC32, writes the image using the ESP32 `Update` API, and restarts after a successful update.
 
 The desktop uploader in `Firmware_PythonFiles` provides a small Tkinter GUI that checks the ESP32 status, sends OTA metadata, streams firmware chunks, waits for an ACK after each chunk, and displays upload progress.
+
+## Version Control
+
+| Version | Scope | Changes |
+| --- | --- | --- |
+| `v0.1` | Base automation firmware | Added ESP32 MQTT connectivity, 8-channel relay output control, physical input/button handling, relay state publishing, and basic MQTT command handling for local automation. |
+| `v0.2` | OTA and desktop uploader | Added MQTT OTA update flow, firmware metadata transfer, chunked binary upload, per-chunk ACK handling, CRC32 verification, OTA status publishing, ESP32 log publishing, auto-discovery through `<deviceID>/info`, and the Python Tkinter uploader workflow. |
+| `v0.3` | App identity and WiFi config | Added user device name support with NVS persistence, `<deviceID>/set_name`, expanded `<deviceID>/info` with the saved `name`, periodic info republishing for app rediscovery, WiFi credential storage in NVS, `<deviceID>/wifi/request`, `<deviceID>/wifi/config`, and `<deviceID>/wifi/set` with reboot after saving new credentials. |
 
 ## Project Structure
 
@@ -36,7 +44,9 @@ The desktop uploader in `Firmware_PythonFiles` provides a small Tkinter GUI that
 - Controls 2 RGB LED strips using 0-100 percent `R,G,B` MQTT payloads.
 - Publishes each RGB strip state as retained `R,G,B` CSV text.
 - Uses the ESP32 MAC-derived ID as the MQTT topic prefix.
-- Publishes retained firmware information on `<deviceID>/info`.
+- Publishes retained device information on `<deviceID>/info`.
+- Stores app-visible device name in NVS from `<deviceID>/set_name`.
+- Stores WiFi credentials in NVS and reports them to the app when requested.
 - Responds to OTA readiness checks on `<deviceID>/ota_check`.
 - Receives OTA metadata on `<deviceID>/ota/begin`.
 - Receives firmware chunks on `<deviceID>/ota/chunk`.
@@ -58,11 +68,15 @@ Automation topics are fixed `home/...` topics.
 | `home/rgb/2/status` | ESP32 to broker | `R,G,B` | Retained RGB strip 2 state, each value from 0 to 100 |
 | `home/rgb/2/set` | Broker to ESP32 | `R,G,B` | Sets RGB strip 2 brightness percentages |
 
-OTA topics use the ESP32 MAC-derived device ID as the prefix.
+Device, WiFi, and OTA topics use the ESP32 MAC-derived device ID as the prefix.
 
 | Topic | Direction | Purpose |
 | --- | --- | --- |
-| `<deviceID>/info` | ESP32 to broker | Retained firmware version and device ID |
+| `<deviceID>/info` | ESP32 to app | Retained JSON device info: `{"id":"<deviceID>","firmware":"<version>","name":"<name>"}` |
+| `<deviceID>/set_name` | App to ESP32 | Plain text device name saved to NVS |
+| `<deviceID>/wifi/request` | App to ESP32 | `GET_CONFIG` request for the saved WiFi credentials |
+| `<deviceID>/wifi/config` | ESP32 to app | JSON WiFi reply: `{"ssid":"<ssid>","password":"<password>"}` |
+| `<deviceID>/wifi/set` | App to ESP32 | JSON WiFi update: `{"ssid":"<ssid>","password":"<password>"}`; ESP32 saves and reboots |
 | `<deviceID>/ota_check` | Uploader to ESP32 | Readiness check before upload |
 | `<deviceID>/ota_status` | ESP32 to uploader | `READY`, `UPDATING`, `SUCCESS`, or `FAILED` |
 | `<deviceID>/ota/begin` | Uploader to ESP32 | Firmware size, chunk count, and CRC32 |
@@ -100,6 +114,15 @@ RGB command examples:
 7. ESP32 writes each chunk and publishes the chunk index on `<deviceID>/ota/ack`.
 8. Uploader sends `END` to `<deviceID>/ota/end`.
 9. ESP32 verifies CRC32, publishes `SUCCESS`, and restarts.
+
+## App Discovery and WiFi Flow
+
+1. ESP32 boots, loads the saved device name and WiFi credentials from NVS, then connects to WiFi and MQTT.
+2. ESP32 publishes `<deviceID>/info` with `id`, `firmware`, and `name`.
+3. The app subscribes to `+/info`, discovers the device, then publishes `GET_CONFIG` to `<deviceID>/wifi/request`.
+4. ESP32 replies immediately on `<deviceID>/wifi/config` with the saved `ssid` and `password`.
+5. If the app sends a new name to `<deviceID>/set_name`, ESP32 saves it in NVS and republishes `<deviceID>/info`.
+6. If the app sends new WiFi credentials to `<deviceID>/wifi/set`, ESP32 saves them in NVS, publishes a log confirmation, and reboots.
 
 ## Build Firmware
 
@@ -147,8 +170,9 @@ Upload steps:
 Firmware settings are in `ESP32_Bootloader/include/Config.h` and `ESP32_Bootloader/src/main.cpp`.
 
 - `FW_VERSION` controls the firmware version published to MQTT.
-- `MQTT_BUFFER_SIZE` is set to `4096` for OTA chunk packets.
-- `WIFI_SSID` and `WIFI_PASSWORD` configure the ESP32 Wi-Fi connection and were kept as already present in code.
+- `MQTT_BUFFER_SIZE` is set to `8192` for OTA chunk packets.
+- `INFO_PUBLISH_INTERVAL` controls how often `<deviceID>/info` is republished for app rediscovery.
+- `WIFI_SSID` and `WIFI_PASSWORD` are the first-boot defaults. After WiFi credentials are saved through MQTT, the ESP32 loads them from NVS.
 - `MQTT_BROKER` and `MQTT_PORT` configure the MQTT broker and were kept as already present in code.
 
 Home automation pin settings are in `ESP32_Bootloader/src/home_automation.cpp`.

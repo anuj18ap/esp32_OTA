@@ -5,17 +5,24 @@
  Dependencies:  pip install paho-mqtt
  Python 3.8+  |  paho-mqtt 2.x
 
- MQTT Topics (publish from ESP32):
-   <MAC>/info          → JSON  {"id":"<MAC>","firmware":"<ver>"}
-   <MAC>/ota_status    → str   READY | UPDATING | FAILED | NO_UPDATE | SUCCESS
-   <MAC>/ota/ack       → str   "<chunk_index>"
-   <MAC>/log           → str   any log line you want to display
+ ── MQTT Topics (ESP32 → App) ──────────────────────────────────
+   <MAC>/info            JSON  {"id":"<MAC>","firmware":"<ver>","name":"<name>"}
+   <MAC>/ota_status      str   READY | UPDATING | FAILED | NO_UPDATE | SUCCESS
+   <MAC>/ota/ack         str   "<chunk_index>"
+   <MAC>/log             str   any log line
+   <MAC>/wifi/config     JSON  {"ssid":"<s>","password":"<p>"}   (reply to request)
 
- Topics published TO the ESP32 from this app:
-   <MAC>/ota_check     → "ARE_YOU_READY"
-   <MAC>/ota/begin     → JSON  {"size":N,"chunks":N,"crc32":N}
-   <MAC>/ota/chunk     → binary  [4-byte big-endian index][data]
-   <MAC>/ota/end       → "END"
+ ── MQTT Topics (App → ESP32) ──────────────────────────────────
+   <MAC>/ota_check       "ARE_YOU_READY"
+   <MAC>/ota/begin       JSON  {"size":N,"chunks":N,"crc32":N}
+   <MAC>/ota/chunk       binary [4-byte big-endian index][data]
+   <MAC>/ota/end         "END"
+   <MAC>/set_name        str   "My Device Label"   (ESP32 saves to NVS)
+   <MAC>/wifi/request    "GET_CONFIG"               (ESP32 replies on /wifi/config)
+   <MAC>/wifi/set        JSON  {"ssid":"<s>","password":"<p>"}
+
+ ── Admin passkey (WiFi password reveal) ───────────────────────
+   Passkey: 7096099673
 ================================================================
 """
 
@@ -29,7 +36,7 @@ import paho.mqtt.client as mqtt
 # ─────────────────────────────────────────────
 #  CONFIG
 # ─────────────────────────────────────────────
-APP_VERSION      = 1.0
+APP_VERSION      = 1.2
 MQTT_BROKER      = "broker.emqx.io"
 MQTT_PORT        = 1883
 CHUNK_SIZE       = 7168
@@ -39,7 +46,9 @@ CHUNK_QOS        = 0
 COMMAND_QOS      = 1
 BEGIN_DELAY      = 0.15
 CHECK_TIMEOUT_MS = 8000
-MAX_LOG_LINES    = 2000        # cap log buffer
+MAX_LOG_LINES    = 2000
+ADMIN_PASSKEY    = "7096099673"
+NAMES_FILE       = "device_names.json"   # local cache
 
 # ─────────────────────────────────────────────
 #  DESIGN TOKENS
@@ -82,7 +91,6 @@ STATUS_COLORS = {
     "timeout"     : WARNING,
 }
 
-# Log-line colour by level keyword
 LOG_COLORS = {
     "ERROR"  : DANGER,
     "WARN"   : WARNING,
@@ -93,12 +101,56 @@ LOG_COLORS = {
 }
 
 # ─────────────────────────────────────────────
+#  DEVICE NAME STORE  (MAC → friendly name)
+#  Persisted to NAMES_FILE; also sent to ESP32
+# ─────────────────────────────────────────────
+_names: dict[str, str] = {}
+_names_lock = threading.Lock()
+
+def _load_names():
+    global _names
+    try:
+        if os.path.exists(NAMES_FILE):
+            with open(NAMES_FILE) as f:
+                _names = json.load(f)
+    except Exception:
+        _names = {}
+
+def _save_names():
+    try:
+        with _names_lock:
+            data = dict(_names)
+        with open(NAMES_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[Names] save error: {e}")
+
+def get_name(mac: str) -> str:
+    with _names_lock:
+        return _names.get(mac.upper(), "")
+
+def set_name(mac: str, name: str):
+    mac = mac.upper()
+    with _names_lock:
+        _names[mac] = name
+    _save_names()
+
+def display_name(mac: str) -> str:
+    """Returns friendly name if set, else just MAC."""
+    n = get_name(mac)
+    return n if n else mac
+
+def display_name_with_mac(mac: str) -> str:
+    """Returns 'Name (MAC)' if name set, else just MAC. Used in dropdowns/selectors."""
+    n = get_name(mac)
+    return f"{n}  ({mac})" if n else mac
+
+# ─────────────────────────────────────────────
 #  GLOBAL LOG STORE
-#  Each entry: {"ts": str, "mac": str, "text": str, "color": str}
 # ─────────────────────────────────────────────
 _log_entries: list[dict] = []
 _log_lock    = threading.Lock()
-_log_panel: Optional["LogsPanel"] = None   # set after build_gui()
+_log_panel: Optional["LogsPanel"] = None
 
 def _add_log(mac: str, text: str, color: str = TEXT_SEC):
     ts    = datetime.datetime.now().strftime("%H:%M:%S")
@@ -127,6 +179,10 @@ class DeviceSession:
     check_timer_id:  Any             = None
     ota_running:     bool            = False
     auto_discovered: bool            = False
+    # WiFi state (populated when ESP32 replies to wifi/request)
+    wifi_ssid:       str             = ""
+    wifi_password:   str             = ""
+    wifi_received:   bool            = False
     ui:              Any             = None   # DeviceRow
 
 # ─────────────────────────────────────────────
@@ -169,12 +225,23 @@ _pulse_id  = None
 _pulse_a   = 0.0
 _pulse_dir = 1
 
+# Global references filled by build_gui()
+sb_dot:  Optional[tk.Label] = None
+sb_text: Optional[tk.Label] = None
+device_count_lbl: Optional[tk.Label] = None
+
+# Panels that need refresh on new devices
+_settings_panel: Optional["SettingsPanel"] = None
+_info_panel:     Optional["DeviceInfoPanel"] = None
+
+
 def _on_connect(client, userdata, flags, rc, props):
     if rc == 0:
-        client.subscribe("+/info",       qos=0)
-        client.subscribe("+/ota_status", qos=1)
-        client.subscribe("+/ota/ack",    qos=1)
-        client.subscribe("+/log",        qos=0)   # device log lines
+        client.subscribe("+/info",        qos=0)
+        client.subscribe("+/ota_status",  qos=1)
+        client.subscribe("+/ota/ack",     qos=1)
+        client.subscribe("+/log",         qos=0)
+        client.subscribe("+/wifi/config", qos=1)
         root.after(0, lambda: _mqtt_indicator(MQTT_OK))
         _add_log("SYSTEM", f"Connected to {MQTT_BROKER}:{MQTT_PORT}", SUCCESS)
     else:
@@ -193,7 +260,7 @@ def _on_message(client, userdata, msg):
         return
     mac = parts[0].upper()
 
-    # ── /info — auto-discovery ──────────────────
+    # ── /info — auto-discovery + name sync ──────
     if topic.endswith("/info"):
         try:
             d = json.loads(payload)
@@ -201,27 +268,38 @@ def _on_message(client, userdata, msg):
                 return
             discovered_mac = str(d.get("id", mac)).upper().replace(":", "")
             fw_version     = str(d.get("firmware", "?"))
+            device_name    = str(d.get("name", "")).strip()
         except Exception:
             return
+
+        # If device sent a name, update local cache
+        if device_name:
+            set_name(discovered_mac, device_name)
 
         existing = get_session(discovered_mac)
         if existing:
             existing.fw_version = f"v{fw_version}"
             root.after(0, lambda s=existing: s.ui and s.ui.refresh_fw_version())
+            root.after(0, lambda s=existing: s.ui and s.ui.refresh_name())
         else:
             session = get_or_create_session(discovered_mac)
-            session.fw_version    = f"v{fw_version}"
-            session.status        = "ready"
-            session.status_text   = "AUTO-DISCOVERED"
-            session.device_ready  = True
+            session.fw_version     = f"v{fw_version}"
+            session.status         = "ready"
+            session.status_text    = "AUTO-DISCOVERED"
+            session.device_ready   = True
             session.auto_discovered = True
-            _add_log(discovered_mac, f"Auto-discovered  fw=v{fw_version}", ACCENT)
+            _add_log(discovered_mac,
+                     f"Auto-discovered  fw=v{fw_version}"
+                     + (f"  name={device_name}" if device_name else ""),
+                     ACCENT)
             root.after(0, lambda s=session, fv=fw_version:
                        _auto_add_device_row(s, fv))
-            root.after(0, lambda: _log_panel and _log_panel.refresh_filter_menu())
+            root.after(0, _refresh_all_panels)
+            # ── Auto-request WiFi config on discovery ──
+            root.after(500, lambda m=discovered_mac: _auto_request_wifi(m))
         return
 
-    # ── /log — device log line ──────────────────
+    # ── /log ────────────────────────────────────
     if topic.endswith("/log"):
         col = TEXT_SEC
         up  = payload.upper()
@@ -230,6 +308,23 @@ def _on_message(client, userdata, msg):
                 col = c
                 break
         _add_log(mac, payload, col)
+        return
+
+    # ── /wifi/config — ESP32 reply with credentials
+    if topic.endswith("/wifi/config"):
+        session = get_session(mac)
+        if not session:
+            return
+        try:
+            d = json.loads(payload)
+            session.wifi_ssid     = d.get("ssid", "")
+            session.wifi_password = d.get("password", "")
+            session.wifi_received = True
+            _add_log(mac, f"WiFi config received  ssid={session.wifi_ssid}", SUCCESS)
+        except Exception:
+            _add_log(mac, "WiFi config parse error", DANGER)
+        root.after(0, lambda: _info_panel and _info_panel.on_wifi_received(mac))
+        root.after(0, lambda: _settings_panel and _settings_panel.on_wifi_received(mac))
         return
 
     session = get_session(mac)
@@ -260,7 +355,6 @@ def _on_message(client, userdata, msg):
         col_map = {"ready": SUCCESS, "transferring": ACCENT,
                    "failed": DANGER, "no_update": TEXT_SEC, "success": SUCCESS}
         _add_log(mac, f"OTA status → {payload}", col_map.get(status_key, TEXT_SEC))
-
         session.status      = status_key
         session.status_text = status_txt
 
@@ -277,13 +371,35 @@ def _on_message(client, userdata, msg):
         root.after(0, lambda s=session: s.ui and s.ui.refresh_status())
 
 
+def _auto_request_wifi(mac: str):
+    """Automatically request WiFi config after device discovery."""
+    if not mqtt_client:
+        return
+    session = get_session(mac)
+    if not session:
+        return
+    mqtt_client.subscribe(f"{mac}/wifi/config", qos=1)
+    mqtt_client.publish(f"{mac}/wifi/request", "GET_CONFIG", qos=COMMAND_QOS)
+    _add_log(mac, "WiFi config auto-requested on discovery", TEXT_DIM)
+
+
+def _refresh_all_panels():
+    if _log_panel:
+        _log_panel.refresh_filter_menu()
+    if _settings_panel:
+        _settings_panel.refresh_device_list()
+    if _info_panel:
+        _info_panel.refresh_device_list()
+
+
 def _auto_add_device_row(session: "DeviceSession", fw_version: str):
-    if not hasattr(_auto_add_device_row, "_manager") or _auto_add_device_row._manager is None:
+    if not hasattr(_auto_add_device_row, "_manager") or \
+            _auto_add_device_row._manager is None:
         return
     mgr = _auto_add_device_row._manager
 
     if len(mgr.rows) >= DeviceManager.MAX_DEVICES:
-        print(f"[Discovery] Ignored {session.mac} — device limit reached")
+        print(f"[Discovery] Ignored {session.mac} — limit reached")
         return
     for row in mgr.rows:
         if row.session and row.session.mac == session.mac:
@@ -304,6 +420,7 @@ def _auto_add_device_row(session: "DeviceSession", fw_version: str):
     row.mac_entry.config(state=tk.DISABLED)
     row.fw_var.set(session.fw_version)
     row.refresh_status()
+    row.refresh_name()
 
     mgr.rows.append(row)
     _update_device_counter(len(mgr.rows))
@@ -396,6 +513,162 @@ def _on_check_timeout(session: DeviceSession):
         root.after(0, lambda s=session: s.ui and s.ui.on_check_timeout())
 
 # ─────────────────────────────────────────────
+#  HELPERS
+# ─────────────────────────────────────────────
+def _make_input(parent, width=22, show=None):
+    e = tk.Entry(parent, font=(FONT_MONO, 10),
+                 bg=INPUT_BG, fg=TEXT_PRI,
+                 insertbackground=TEXT_PRI,
+                 relief=tk.FLAT, bd=0,
+                 highlightthickness=1,
+                 highlightbackground=INPUT_BD,
+                 highlightcolor=INPUT_FOCUS,
+                 width=width)
+    if show:
+        e.config(show=show)
+    return e
+
+def _make_btn(parent, text, cmd, bg=ACCENT, fg="white",
+              padx=14, pady=6):
+    return tk.Button(parent, text=text,
+                     font=(FONT_UI, 9, "bold"),
+                     bg=bg, fg=fg,
+                     activebackground=ACCENT_HOV,
+                     activeforeground="white",
+                     relief=tk.FLAT, bd=0,
+                     highlightthickness=0,
+                     padx=padx, pady=pady,
+                     cursor="hand2",
+                     command=cmd)
+
+def _section_label(parent, text):
+    tk.Label(parent, text=text,
+             font=(FONT_MONO, 7, "bold"),
+             bg=CARD_BG, fg=TEXT_DIM,
+             anchor="w").pack(fill=tk.X, pady=(10, 2))
+
+# ─────────────────────────────────────────────
+#  ADMIN PASSKEY DIALOG
+# ─────────────────────────────────────────────
+def _ask_admin_passkey(on_success):
+    """Show a modal dialog asking for the admin passkey.
+    Calls on_success() if correct."""
+    dlg = tk.Toplevel(root)
+    dlg.title("Admin Access Required")
+    dlg.configure(bg=CARD_BG)
+    dlg.resizable(False, False)
+    dlg.grab_set()
+    dlg.transient(root)
+
+    # Centre over root
+    root.update_idletasks()
+    x = root.winfo_x() + root.winfo_width()  // 2 - 200
+    y = root.winfo_y() + root.winfo_height() // 2 - 100
+    dlg.geometry(f"400x210+{x}+{y}")
+
+    tk.Frame(dlg, bg=WARNING, height=3).pack(fill=tk.X)
+
+    body = tk.Frame(dlg, bg=CARD_BG, padx=28, pady=20)
+    body.pack(fill=tk.BOTH, expand=True)
+
+    tk.Label(body, text="🔒  Admin Passkey Required",
+             font=(FONT_UI, 11, "bold"),
+             bg=CARD_BG, fg=TEXT_PRI).pack(anchor="w")
+    tk.Label(body,
+             text="Enter the admin passkey to reveal WiFi passwords.",
+             font=(FONT_UI, 9),
+             bg=CARD_BG, fg=TEXT_SEC).pack(anchor="w", pady=(4, 14))
+
+    entry = _make_input(body, width=28, show="●")
+    entry.pack(anchor="w", ipady=6, ipadx=6)
+    entry.focus_set()
+
+    err_lbl = tk.Label(body, text="",
+                       font=(FONT_UI, 9, "bold"),
+                       bg=CARD_BG, fg=DANGER)
+    err_lbl.pack(anchor="w", pady=(6, 0))
+
+    btn_row = tk.Frame(body, bg=CARD_BG)
+    btn_row.pack(fill=tk.X, pady=(10, 0))
+
+    def _submit():
+        if entry.get() == ADMIN_PASSKEY:
+            dlg.destroy()
+            on_success()
+        else:
+            err_lbl.config(text="Incorrect passkey. Try again.")
+            entry.delete(0, tk.END)
+            entry.focus_set()
+
+    def _cancel():
+        dlg.destroy()
+
+    _make_btn(btn_row, "Unlock", _submit,
+              bg=WARNING, fg="#1a0a00").pack(side=tk.LEFT)
+    _make_btn(btn_row, "Cancel", _cancel,
+              bg=MUTED, fg=TEXT_SEC).pack(side=tk.LEFT, padx=(8, 0))
+
+    entry.bind("<Return>", lambda e: _submit())
+
+# ─────────────────────────────────────────────
+#  WIFI PASSWORD CONFIRM DIALOG
+#  Used before pushing WiFi credentials to a device
+# ─────────────────────────────────────────────
+def _ask_wifi_password(on_confirm):
+    """Show a modal dialog asking for the WiFi password before pushing config."""
+    dlg = tk.Toplevel(root)
+    dlg.title("Confirm WiFi Password")
+    dlg.configure(bg=CARD_BG)
+    dlg.resizable(False, False)
+    dlg.grab_set()
+    dlg.transient(root)
+
+    root.update_idletasks()
+    x = root.winfo_x() + root.winfo_width()  // 2 - 200
+    y = root.winfo_y() + root.winfo_height() // 2 - 100
+    dlg.geometry(f"420x230+{x}+{y}")
+
+    tk.Frame(dlg, bg=ACCENT, height=3).pack(fill=tk.X)
+
+    body = tk.Frame(dlg, bg=CARD_BG, padx=28, pady=20)
+    body.pack(fill=tk.BOTH, expand=True)
+
+    tk.Label(body, text="⚙  Confirm WiFi Password",
+             font=(FONT_UI, 11, "bold"),
+             bg=CARD_BG, fg=TEXT_PRI).pack(anchor="w")
+    tk.Label(body,
+             text="Enter the WiFi password to push to the device.",
+             font=(FONT_UI, 9),
+             bg=CARD_BG, fg=TEXT_SEC).pack(anchor="w", pady=(4, 14))
+
+    entry = _make_input(body, width=30, show="●")
+    entry.pack(anchor="w", ipady=6, ipadx=6)
+    entry.focus_set()
+
+    err_lbl = tk.Label(body, text="",
+                       font=(FONT_UI, 9, "bold"),
+                       bg=CARD_BG, fg=DANGER)
+    err_lbl.pack(anchor="w", pady=(4, 0))
+
+    btn_row = tk.Frame(body, bg=CARD_BG)
+    btn_row.pack(fill=tk.X, pady=(10, 0))
+
+    def _submit():
+        pw = entry.get()
+        dlg.destroy()
+        on_confirm(pw)
+
+    def _cancel():
+        dlg.destroy()
+
+    _make_btn(btn_row, "Apply", _submit,
+              bg=SUCCESS, fg="#001a00").pack(side=tk.LEFT)
+    _make_btn(btn_row, "Cancel", _cancel,
+              bg=MUTED, fg=TEXT_SEC).pack(side=tk.LEFT, padx=(8, 0))
+
+    entry.bind("<Return>", lambda e: _submit())
+
+# ─────────────────────────────────────────────
 #  OTA WORKER
 # ─────────────────────────────────────────────
 def _ota_worker(session: DeviceSession):
@@ -409,7 +682,6 @@ def _ota_worker(session: DeviceSession):
         _add_log(session.mac,
                  f"OTA begin  size={total}B  chunks={chunks}  crc32={crc:#010x}",
                  ACCENT)
-
         mqtt_client.publish(
             f"{session.mac}/ota/begin",
             json.dumps({"size": total, "chunks": chunks, "crc32": crc}),
@@ -451,7 +723,7 @@ def _ota_worker(session: DeviceSession):
         mqtt_client.publish(f"{session.mac}/ota/end", "END", qos=COMMAND_QOS)
         session.status      = "verifying"
         session.status_text = "Verifying — waiting for ESP32…"
-        _add_log(session.mac, "All chunks sent — verifying CRC on device…", ACCENT)
+        _add_log(session.mac, "All chunks sent — verifying CRC…", ACCENT)
         root.after(0, lambda s=session: s.ui and s.ui.refresh_status())
 
     except FileNotFoundError:
@@ -470,11 +742,10 @@ def _ota_worker(session: DeviceSession):
             s.ui.refresh_status(), s.ui.on_ota_finished()))
 
 # ─────────────────────────────────────────────
-#  DEVICE ROW
+#  DEVICE ROW  (OTA Flash page)
+#  ── Name shown as read-only label, no edit ──
 # ─────────────────────────────────────────────
 class DeviceRow:
-    ROW_HEIGHT = 170
-
     def __init__(self, parent_frame, manager, index: int):
         self.manager = manager
         self.index   = index
@@ -498,11 +769,22 @@ class DeviceRow:
                  font=(FONT_MONO, 9, "bold"),
                  bg=ACCENT, fg="white").place(relx=0.5, rely=0.5, anchor="center")
 
-        # MAC block
-        mac_block = tk.Frame(top, bg=CARD_BG)
-        mac_block.pack(side=tk.LEFT)
+        # ── Left column: Name (read-only label) + MAC ──
+        left_col = tk.Frame(top, bg=CARD_BG)
+        left_col.pack(side=tk.LEFT)
 
-        mac_lbl_row = tk.Frame(mac_block, bg=CARD_BG)
+        # Device name — read-only display label
+        tk.Label(left_col, text="DEVICE NAME",
+                 font=(FONT_MONO, 7, "bold"),
+                 bg=CARD_BG, fg=TEXT_DIM, anchor="w").pack(fill=tk.X)
+
+        self._name_lbl = tk.Label(left_col, text="—",
+                                   font=(FONT_UI, 10, "bold"),
+                                   bg=CARD_BG, fg=SUCCESS, anchor="w")
+        self._name_lbl.pack(fill=tk.X, pady=(2, 8))
+
+        # MAC address row
+        mac_lbl_row = tk.Frame(left_col, bg=CARD_BG)
         mac_lbl_row.pack(fill=tk.X)
         tk.Label(mac_lbl_row, text="MAC ADDRESS",
                  font=(FONT_MONO, 7, "bold"),
@@ -511,7 +793,7 @@ class DeviceRow:
                                    font=(FONT_MONO, 7, "bold"),
                                    bg="#0d2a4a", fg=ACCENT, padx=4, pady=0)
 
-        mac_input_row = tk.Frame(mac_block, bg=CARD_BG)
+        mac_input_row = tk.Frame(left_col, bg=CARD_BG)
         mac_input_row.pack(fill=tk.X)
         self.mac_entry = tk.Entry(mac_input_row,
                                   font=(FONT_MONO, 11),
@@ -541,15 +823,15 @@ class DeviceRow:
                  font=(FONT_MONO, 7, "bold"),
                  bg=CARD_BG, fg=TEXT_DIM, anchor="w").pack(fill=tk.X)
         self.fw_var = tk.StringVar(value="—")
-        self.fw_entry = tk.Entry(fw_block,
+        tk.Entry(fw_block,
                  textvariable=self.fw_var,
                  font=(FONT_MONO, 10, "bold"),
                  bg=INPUT_BG, fg=TEXT_DIM,
                  relief=tk.FLAT, bd=0,
                  highlightthickness=1, highlightbackground=INPUT_BD,
                  width=9, state="readonly",
-                 readonlybackground=INPUT_BG, cursor="arrow")
-        self.fw_entry.pack(ipady=5, ipadx=6)
+                 readonlybackground=INPUT_BG, cursor="arrow"
+                 ).pack(ipady=5, ipadx=6)
 
         # Remove
         self.remove_btn = tk.Button(top, text="✕",
@@ -589,17 +871,15 @@ class DeviceRow:
                                  font=(FONT_UI, 9), bg=CARD_BG,
                                  fg=TEXT_DIM, anchor="w", width=30)
         self.file_lbl.pack(side=tk.LEFT)
-        self.browse_btn = tk.Button(file_row, text="Browse…",
-                                    font=(FONT_UI, 8),
-                                    bg=MUTED, fg=TEXT_SEC,
-                                    activebackground=INPUT_BD,
-                                    activeforeground=TEXT_PRI,
-                                    relief=tk.FLAT, bd=0,
-                                    highlightthickness=1,
-                                    highlightbackground=CARD_BORDER,
-                                    padx=10, pady=4, cursor="hand2",
-                                    command=self.cb_browse)
-        self.browse_btn.pack(side=tk.LEFT, padx=(8, 0))
+        tk.Button(file_row, text="Browse…",
+                  font=(FONT_UI, 8),
+                  bg=MUTED, fg=TEXT_SEC,
+                  activebackground=INPUT_BD, activeforeground=TEXT_PRI,
+                  relief=tk.FLAT, bd=0,
+                  highlightthickness=1, highlightbackground=CARD_BORDER,
+                  padx=10, pady=4, cursor="hand2",
+                  command=self.cb_browse
+                  ).pack(side=tk.LEFT, padx=(8, 0))
 
         self.upload_btn = tk.Button(mid, text="⬆  Upload",
                                     font=(FONT_UI, 10, "bold"),
@@ -616,7 +896,6 @@ class DeviceRow:
         # Progress
         prog_frame = tk.Frame(self.card, bg=CARD_BG)
         prog_frame.pack(fill=tk.X, padx=14, pady=(2, 10))
-
         prog_top = tk.Frame(prog_frame, bg=CARD_BG)
         prog_top.pack(fill=tk.X, pady=(0, 3))
         self.prog_left = tk.Label(prog_top, text="",
@@ -637,7 +916,7 @@ class DeviceRow:
                                     mode="determinate", style=sn)
         self.pbar.pack(fill=tk.X)
 
-        # Force upload warning
+        # Force-upload warning
         self.force_frame = tk.Frame(self.card, bg=CARD_BG)
         tk.Label(self.force_frame,
                  text="⚠  No response. Use Force Upload to skip handshake.",
@@ -664,9 +943,15 @@ class DeviceRow:
             self.auto_badge.pack_forget()
 
     def refresh_fw_version(self):
+        if self.session:
+            self.fw_var.set(self.session.fw_version)
+
+    def refresh_name(self):
+        """Update the read-only name label from local name store."""
         if not self.session:
             return
-        self.fw_var.set(self.session.fw_version)
+        n = get_name(self.session.mac)
+        self._name_lbl.config(text=n if n else "—")
 
     def update_progress(self, pct, done, total):
         self.pbar["value"] = pct
@@ -705,7 +990,6 @@ class DeviceRow:
     def _lock_controls(self):
         self.mac_entry.config(state=tk.DISABLED)
         self.check_btn.config(state=tk.DISABLED)
-        self.browse_btn.config(state=tk.DISABLED)
         self.upload_btn.config(state=tk.DISABLED, bg=MUTED,
                                fg=TEXT_DIM, cursor="")
 
@@ -713,7 +997,6 @@ class DeviceRow:
         is_auto = self.session and getattr(self.session, "auto_discovered", False)
         self.mac_entry.config(state=tk.DISABLED if is_auto else tk.NORMAL)
         self.check_btn.config(state=tk.NORMAL)
-        self.browse_btn.config(state=tk.NORMAL)
 
     # ── callbacks ───────────────────────────────
     def cb_check(self):
@@ -742,22 +1025,21 @@ class DeviceRow:
         self.fw_var.set("—")
         self.reset_progress()
         self.refresh_status()
+        self.refresh_name()
         self._refresh_upload_btn()
 
         _add_log(mac, "Sending ARE_YOU_READY…", TEXT_SEC)
-        mqtt_client.subscribe(f"{mac}/ota_status", qos=1)
-        mqtt_client.subscribe(f"{mac}/ota/ack",    qos=1)
-        mqtt_client.subscribe(f"{mac}/info",       qos=0)
-        mqtt_client.subscribe(f"{mac}/log",        qos=0)
-        mqtt_client.publish(f"{mac}/ota_check", "ARE_YOU_READY",
-                            qos=COMMAND_QOS)
+        mqtt_client.subscribe(f"{mac}/ota_status",  qos=1)
+        mqtt_client.subscribe(f"{mac}/ota/ack",     qos=1)
+        mqtt_client.subscribe(f"{mac}/info",        qos=0)
+        mqtt_client.subscribe(f"{mac}/log",         qos=0)
+        mqtt_client.subscribe(f"{mac}/wifi/config", qos=1)
+        mqtt_client.publish(f"{mac}/ota_check", "ARE_YOU_READY", qos=COMMAND_QOS)
 
         session.check_timer_id = root.after(
             CHECK_TIMEOUT_MS, lambda s=session: _on_check_timeout(s))
 
-        # Update log filter menu with new MAC
-        if _log_panel:
-            root.after(100, _log_panel.refresh_filter_menu)
+        root.after(100, _refresh_all_panels)
 
     def cb_browse(self):
         p = filedialog.askopenfilename(
@@ -795,8 +1077,7 @@ class DeviceRow:
         if not fp:
             messagebox.showerror("No File", "Select a firmware file first.")
             return
-        if not messagebox.askyesno(
-                "Force Upload",
+        if not messagebox.askyesno("Force Upload",
                 f"Skip READY handshake for {self.session.mac}?\n\n"
                 "Only proceed if the device is waiting for OTA."):
             return
@@ -855,11 +1136,9 @@ class DeviceManager:
                     and r.session.firmware_path and not r.session.ota_running]
         if not eligible:
             messagebox.showinfo("Flash All",
-                "No devices are READY with a firmware file selected.\n\n"
-                "Check each device first.")
+                "No devices are READY with a firmware file selected.")
             return
-        if not messagebox.askyesno(
-                "Flash All",
+        if not messagebox.askyesno("Flash All",
                 f"Start OTA on {len(eligible)} device(s) simultaneously?"):
             return
         for r in eligible:
@@ -876,17 +1155,16 @@ class DeviceManager:
 
 # ─────────────────────────────────────────────
 #  LOGS PANEL
+#  ── If name known: show name only (no MAC) ──
+#  ── If no name: show MAC only              ──
 # ─────────────────────────────────────────────
 class LogsPanel:
-    """Full-page logs view with MAC filter dropdown and clear button."""
-
     ALL = "All Devices"
 
     def __init__(self, parent: tk.Frame):
-        self.parent       = parent
-        self._filter_mac  = self.ALL   # currently selected filter
+        self.parent      = parent
+        self._filter_mac = self.ALL
 
-        # ── toolbar ──────────────────────────────
         bar = tk.Frame(parent, bg=PANEL_BG, padx=20, pady=12)
         bar.pack(fill=tk.X)
 
@@ -894,17 +1172,11 @@ class LogsPanel:
                  font=(FONT_MONO, 10, "bold"),
                  bg=PANEL_BG, fg=TEXT_PRI).pack(side=tk.LEFT)
 
-        # Clear button
-        tk.Button(bar, text="✕  Clear",
-                  font=(FONT_UI, 9, "bold"),
+        _make_btn(bar, "✕  Clear", self._clear,
                   bg=DANGER_DIM, fg=DANGER,
-                  activebackground="#6b1010", activeforeground="white",
-                  relief=tk.FLAT, bd=0, highlightthickness=0,
-                  padx=12, pady=5, cursor="hand2",
-                  command=self._clear).pack(side=tk.RIGHT, padx=(6, 0))
+                  padx=12, pady=5).pack(side=tk.RIGHT)
 
-        # Filter dropdown
-        tk.Label(bar, text="Filter by MAC:",
+        tk.Label(bar, text="Filter by MAC / Name:",
                  font=(FONT_UI, 9),
                  bg=PANEL_BG, fg=TEXT_SEC).pack(side=tk.RIGHT, padx=(12, 4))
 
@@ -916,7 +1188,6 @@ class LogsPanel:
 
         tk.Frame(parent, bg=CARD_BORDER, height=1).pack(fill=tk.X)
 
-        # ── log text area ─────────────────────────
         log_frame = tk.Frame(parent, bg=PANEL_BG)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=10)
 
@@ -938,22 +1209,17 @@ class LogsPanel:
 
         vscroll.config(command=self.text.yview)
         hscroll.config(command=self.text.xview)
-
         vscroll.pack(side=tk.RIGHT,  fill=tk.Y)
         hscroll.pack(side=tk.BOTTOM, fill=tk.X)
         self.text.pack(fill=tk.BOTH, expand=True)
 
-        # Tags for colours
         for kw, col in LOG_COLORS.items():
             self.text.tag_config(kw, foreground=col)
-        self.text.tag_config("TS",     foreground=TEXT_DIM)
-        self.text.tag_config("MAC",    foreground=ACCENT)
-        self.text.tag_config("SYSTEM", foreground=WARNING)
-        self.text.tag_config("DEFAULT",foreground=TEXT_SEC)
+        self.text.tag_config("TS",      foreground=TEXT_DIM)
+        self.text.tag_config("MAC",     foreground=ACCENT)
+        self.text.tag_config("SYSTEM",  foreground=WARNING)
+        self.text.tag_config("DEFAULT", foreground=TEXT_SEC)
 
-        self._auto_scroll = True
-
-        # Replay existing entries on first show
         with _log_lock:
             entries = list(_log_entries)
         for e in entries:
@@ -964,15 +1230,13 @@ class LogsPanel:
         btn.config(bg=MUTED, fg=TEXT_PRI,
                    activebackground=ACCENT_DIM, activeforeground=TEXT_PRI,
                    relief=tk.FLAT, bd=0, highlightthickness=0,
-                   font=(FONT_MONO, 9), padx=10, pady=4,
-                   indicatoron=True)
+                   font=(FONT_MONO, 9), padx=10, pady=4)
         btn["menu"].config(bg=CARD_BG, fg=TEXT_PRI,
                            activebackground=ACCENT_DIM,
                            activeforeground=TEXT_PRI,
                            relief=tk.FLAT, bd=0)
 
     def refresh_filter_menu(self):
-        """Rebuild the MAC dropdown from current sessions + SYSTEM."""
         menu = self._menu_btn["menu"]
         menu.delete(0, tk.END)
         menu.add_command(label=self.ALL,
@@ -980,8 +1244,10 @@ class LogsPanel:
         menu.add_command(label="SYSTEM",
                          command=lambda: self._filter_var.set("SYSTEM"))
         for mac in known_macs():
-            m = mac  # capture
-            menu.add_command(label=m,
+            # Dropdown shows "Name (MAC)" for context, but filter key is MAC
+            label = display_name_with_mac(mac)
+            m = mac
+            menu.add_command(label=label,
                              command=lambda v=m: self._filter_var.set(v))
 
     def _on_filter_change(self, *_):
@@ -989,7 +1255,6 @@ class LogsPanel:
         self._redraw()
 
     def _redraw(self):
-        """Re-render text widget from the full log buffer with current filter."""
         self.text.config(state=tk.NORMAL)
         self.text.delete("1.0", tk.END)
         with _log_lock:
@@ -1006,7 +1271,6 @@ class LogsPanel:
         return entry["mac"] == self._filter_mac
 
     def append_entry(self, entry: dict):
-        """Called from main thread when a new log line arrives."""
         if self._matches(entry):
             self.text.config(state=tk.NORMAL)
             self._insert_entry(entry, scroll=True)
@@ -1018,7 +1282,6 @@ class LogsPanel:
         text = entry["text"]
         col  = entry["color"]
 
-        # Pick tag closest to colour
         tag = "DEFAULT"
         for kw, c in LOG_COLORS.items():
             if col == c:
@@ -1027,8 +1290,17 @@ class LogsPanel:
         if mac == "SYSTEM":
             tag = "SYSTEM"
 
+        # ── Name logic: name only if set, else MAC only ──
+        name = get_name(mac)
+        if mac == "SYSTEM":
+            mac_disp = "SYSTEM"
+        elif name:
+            mac_disp = name          # name only, no MAC suffix
+        else:
+            mac_disp = mac           # MAC only, no name prefix
+
         self.text.insert(tk.END, f"[{ts}] ", "TS")
-        self.text.insert(tk.END, f"{mac:<18}", "MAC" if mac != "SYSTEM" else "SYSTEM")
+        self.text.insert(tk.END, f"{mac_disp:<28}", "MAC" if mac != "SYSTEM" else "SYSTEM")
         self.text.insert(tk.END, f"  {text}\n", tag)
 
         if scroll:
@@ -1045,39 +1317,627 @@ class LogsPanel:
         self.text.config(state=tk.DISABLED)
 
 # ─────────────────────────────────────────────
-#  BLANK PANELS
+#  DEVICE INFO PANEL  (Tab: WiFi & Info)
 # ─────────────────────────────────────────────
-def _blank_panel(parent: tk.Frame, icon: str, title: str, subtitle: str):
-    f = tk.Frame(parent, bg=PANEL_BG)
-    tk.Label(f, text=icon,
-             font=(FONT_MONO, 48),
-             bg=PANEL_BG, fg=MUTED).pack(pady=(80, 8))
-    tk.Label(f, text=title,
-             font=(FONT_UI, 14, "bold"),
-             bg=PANEL_BG, fg=TEXT_SEC).pack()
-    tk.Label(f, text=subtitle,
-             font=(FONT_UI, 10),
-             bg=PANEL_BG, fg=TEXT_DIM).pack(pady=(4, 0))
-    return f
+class DeviceInfoPanel:
+    """Shows WiFi credentials and device info per-device (read-only name)."""
+
+    def __init__(self, parent: tk.Frame):
+        self.parent          = parent
+        self._selected_mac   = tk.StringVar(value="— select device —")
+        self._admin_unlocked = False
+
+        # ── toolbar ──────────────────────────────
+        bar = tk.Frame(parent, bg=PANEL_BG, padx=20, pady=12)
+        bar.pack(fill=tk.X)
+
+        tk.Label(bar, text="DEVICE INFO  ·  WiFi & Identity",
+                 font=(FONT_MONO, 10, "bold"),
+                 bg=PANEL_BG, fg=TEXT_PRI).pack(side=tk.LEFT)
+
+        tk.Frame(parent, bg=CARD_BORDER, height=1).pack(fill=tk.X)
+
+        # ── two-column layout ─────────────────────
+        body = tk.Frame(parent, bg=PANEL_BG)
+        body.pack(fill=tk.BOTH, expand=True, padx=20, pady=16)
+
+        # Left: device selector
+        left = tk.Frame(body, bg=PANEL_BG, width=240)
+        left.pack(side=tk.LEFT, fill=tk.Y)
+        left.pack_propagate(False)
+
+        tk.Label(left, text="SELECT DEVICE",
+                 font=(FONT_MONO, 7, "bold"),
+                 bg=PANEL_BG, fg=TEXT_DIM, anchor="w").pack(fill=tk.X)
+
+        lb_frame = tk.Frame(left, bg=INPUT_BG,
+                            highlightthickness=1,
+                            highlightbackground=CARD_BORDER)
+        lb_frame.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+
+        self._listbox = tk.Listbox(lb_frame,
+                                   bg=INPUT_BG, fg=TEXT_SEC,
+                                   font=(FONT_UI, 10),
+                                   selectbackground=ACCENT_DIM,
+                                   selectforeground=TEXT_PRI,
+                                   relief=tk.FLAT, bd=0,
+                                   highlightthickness=0,
+                                   activestyle="none")
+        self._listbox.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self._listbox.bind("<<ListboxSelect>>", self._on_device_select)
+        self._mac_list: list[str] = []
+
+        # Right: detail panel
+        self._right = tk.Frame(body, bg=PANEL_BG)
+        self._right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(24, 0))
+
+        self._no_sel_lbl = tk.Label(self._right,
+                                    text="Select a device on the left\nto view its info.",
+                                    font=(FONT_UI, 11),
+                                    bg=PANEL_BG, fg=TEXT_DIM)
+        self._no_sel_lbl.pack(pady=60)
+
+        self._detail_frame = tk.Frame(self._right, bg=PANEL_BG)
+        self._build_detail()
+
+        self.refresh_device_list()
+
+    def _build_detail(self):
+        f = self._detail_frame
+
+        # Device name — read-only display
+        tk.Label(f, text="DEVICE NAME",
+                 font=(FONT_MONO, 7, "bold"),
+                 bg=PANEL_BG, fg=TEXT_DIM, anchor="w").pack(fill=tk.X)
+        self._name_display = tk.Label(f, text="—",
+                                      font=(FONT_UI, 12, "bold"),
+                                      bg=PANEL_BG, fg=SUCCESS, anchor="w")
+        self._name_display.pack(anchor="w", pady=(4, 14))
+
+        # Divider
+        tk.Frame(f, bg=CARD_BORDER, height=1).pack(fill=tk.X, pady=(0, 14))
+
+        # WiFi section header
+        wifi_hdr = tk.Frame(f, bg=PANEL_BG)
+        wifi_hdr.pack(fill=tk.X)
+        tk.Label(wifi_hdr, text="WiFi CREDENTIALS",
+                 font=(FONT_MONO, 8, "bold"),
+                 bg=PANEL_BG, fg=TEXT_SEC, anchor="w").pack(side=tk.LEFT)
+        self._admin_badge = tk.Label(wifi_hdr,
+                                     text=" 🔒 ADMIN LOCKED ",
+                                     font=(FONT_MONO, 7, "bold"),
+                                     bg=DANGER_DIM, fg=DANGER,
+                                     padx=6)
+        self._admin_badge.pack(side=tk.LEFT, padx=(10, 0))
+
+        # SSID
+        tk.Label(f, text="SSID",
+                 font=(FONT_MONO, 7, "bold"),
+                 bg=PANEL_BG, fg=TEXT_DIM, anchor="w").pack(fill=tk.X, pady=(10, 2))
+        self._ssid_var = tk.StringVar()
+        self._ssid_entry = tk.Entry(f,
+                                    textvariable=self._ssid_var,
+                                    font=(FONT_MONO, 10),
+                                    bg=INPUT_BG, fg=TEXT_PRI,
+                                    insertbackground=TEXT_PRI,
+                                    relief=tk.FLAT, bd=0,
+                                    highlightthickness=1,
+                                    highlightbackground=INPUT_BD,
+                                    width=28)
+        self._ssid_entry.pack(anchor="w", ipady=5, ipadx=6)
+
+        # Password (admin unlock to reveal plain text)
+        tk.Label(f, text="PASSWORD",
+                 font=(FONT_MONO, 7, "bold"),
+                 bg=PANEL_BG, fg=TEXT_DIM, anchor="w").pack(fill=tk.X, pady=(10, 2))
+        pw_row = tk.Frame(f, bg=PANEL_BG)
+        pw_row.pack(fill=tk.X)
+        self._pw_var = tk.StringVar()
+        self._pw_entry = tk.Entry(pw_row,
+                                  textvariable=self._pw_var,
+                                  font=(FONT_MONO, 10),
+                                  bg=INPUT_BG, fg=TEXT_PRI,
+                                  insertbackground=TEXT_PRI,
+                                  show="●",
+                                  relief=tk.FLAT, bd=0,
+                                  highlightthickness=1,
+                                  highlightbackground=INPUT_BD,
+                                  state=tk.DISABLED,
+                                  disabledbackground=INPUT_BG,
+                                  disabledforeground=TEXT_DIM,
+                                  width=22)
+        self._pw_entry.pack(side=tk.LEFT, ipady=5, ipadx=6)
+        self._unlock_btn = _make_btn(pw_row, "🔒 Unlock",
+                                     self._request_admin,
+                                     bg=DANGER_DIM, fg=WARNING,
+                                     padx=10, pady=5)
+        self._unlock_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        # Action row
+        action_row = tk.Frame(f, bg=PANEL_BG)
+        action_row.pack(fill=tk.X, pady=(16, 0))
+        _make_btn(action_row, "⬆  Push to Device",
+                  self._push_wifi,
+                  bg="#1a3a1a", fg=SUCCESS, padx=12, pady=6
+                  ).pack(side=tk.LEFT)
+
+        self._wifi_status = tk.Label(f, text="",
+                                     font=(FONT_UI, 9),
+                                     bg=PANEL_BG, fg=TEXT_SEC, anchor="w")
+        self._wifi_status.pack(anchor="w", pady=(8, 0))
+
+    def refresh_device_list(self):
+        macs = known_macs()
+        self._mac_list = macs
+        self._listbox.delete(0, tk.END)
+        for mac in macs:
+            n = get_name(mac)
+            self._listbox.insert(tk.END, f"  {n if n else mac}")
+
+    def _on_device_select(self, *_):
+        sel = self._listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if idx >= len(self._mac_list):
+            return
+        mac = self._mac_list[idx]
+        self._selected_mac.set(mac)
+        self._no_sel_lbl.pack_forget()
+        self._detail_frame.pack(fill=tk.BOTH, expand=True)
+        self._load_device(mac)
+
+    def _load_device(self, mac: str):
+        # Name — read-only
+        n = get_name(mac)
+        self._name_display.config(text=n if n else mac)
+
+        session = get_session(mac)
+        if session and session.wifi_received:
+            self._ssid_var.set(session.wifi_ssid)
+            if self._admin_unlocked:
+                # ── FIX: show plain text when admin unlocked ──
+                self._pw_var.set(session.wifi_password)
+                self._pw_entry.config(
+                    state=tk.NORMAL,
+                    show=""                   # remove masking
+                )
+            else:
+                self._pw_var.set("")
+                self._pw_entry.config(
+                    state=tk.DISABLED,
+                    show="●"
+                )
+            self._wifi_status.config(
+                text="✓ WiFi config received from device", fg=SUCCESS)
+        else:
+            self._ssid_var.set("")
+            self._pw_var.set("")
+            self._pw_entry.config(state=tk.DISABLED, show="●")
+            self._wifi_status.config(
+                text="Waiting for WiFi config from device…", fg=TEXT_DIM)
+
+        if self._admin_unlocked:
+            self._admin_badge.config(text=" 🔓 ADMIN UNLOCKED ", bg="#0d2a0d", fg=SUCCESS)
+            self._unlock_btn.config(text="🔓 Unlocked", bg="#0d2a0d", fg=SUCCESS)
+        else:
+            self._admin_badge.config(text=" 🔒 ADMIN LOCKED ", bg=DANGER_DIM, fg=DANGER)
+            self._unlock_btn.config(text="🔒 Unlock", bg=DANGER_DIM, fg=WARNING)
+
+    def _request_admin(self):
+        def _on_unlock():
+            self._admin_unlocked = True
+            mac = self._selected_mac.get()
+            if mac != "— select device —":
+                # ── FIX: immediately reveal password on unlock ──
+                self._load_device(mac)
+        _ask_admin_passkey(_on_unlock)
+
+    def _push_wifi(self):
+        mac = self._selected_mac.get()
+        if mac == "— select device —":
+            messagebox.showerror("No Device", "Select a device first.")
+            return
+        if not mqtt_client:
+            messagebox.showerror("Not Connected", "MQTT not ready.")
+            return
+        ssid = self._ssid_var.get().strip()
+        if not ssid:
+            messagebox.showerror("Missing SSID",
+                "No SSID available. WiFi config may not have been received yet.")
+            return
+
+        def _do_push(pw: str):
+            if not messagebox.askyesno("Push WiFi Config",
+                    f"Send WiFi credentials to {display_name(mac)}?\n\n"
+                    f"SSID: {ssid}\n"
+                    "The device will save these to NVS and reconnect."):
+                return
+            payload = json.dumps({"ssid": ssid, "password": pw})
+            mqtt_client.publish(f"{mac}/wifi/set", payload, qos=COMMAND_QOS)
+            self._wifi_status.config(text="✓ Pushed to device", fg=SUCCESS)
+            _add_log(mac, f"WiFi credentials pushed  ssid={ssid}", SUCCESS)
+
+        _ask_wifi_password(_do_push)
+
+    def on_wifi_received(self, mac: str):
+        if self._selected_mac.get() == mac:
+            self._load_device(mac)
+        self.refresh_device_list()
+
+# ─────────────────────────────────────────────
+#  SETTINGS PANEL  (Tab: Device Names + WiFi)
+# ─────────────────────────────────────────────
+class SettingsPanel:
+    def __init__(self, parent: tk.Frame):
+        self.parent          = parent
+        self._admin_unlocked = False
+
+        # Header
+        hdr = tk.Frame(parent, bg=PANEL_BG, padx=20, pady=12)
+        hdr.pack(fill=tk.X)
+        tk.Label(hdr, text="SETTINGS",
+                 font=(FONT_MONO, 10, "bold"),
+                 bg=PANEL_BG, fg=TEXT_PRI).pack(side=tk.LEFT)
+        tk.Frame(parent, bg=CARD_BORDER, height=1).pack(fill=tk.X)
+
+        # Tab bar
+        tab_bar = tk.Frame(parent, bg=SIDEBAR_BG)
+        tab_bar.pack(fill=tk.X)
+
+        self._tab_frames: dict[str, tk.Frame] = {}
+        self._tab_btns:   dict[str, tk.Button] = {}
+        self._active_tab  = [None]
+
+        content_area = tk.Frame(parent, bg=PANEL_BG)
+        content_area.pack(fill=tk.BOTH, expand=True)
+
+        def make_tab(key, label):
+            f = tk.Frame(content_area, bg=PANEL_BG)
+            self._tab_frames[key] = f
+
+            def _switch(k=key):
+                for k2, f2 in self._tab_frames.items():
+                    if k2 == k:
+                        f2.pack(fill=tk.BOTH, expand=True)
+                        self._tab_btns[k2].config(bg=PANEL_BG, fg=TEXT_PRI)
+                    else:
+                        f2.pack_forget()
+                        self._tab_btns[k2].config(bg=SIDEBAR_BG, fg=TEXT_DIM)
+                self._active_tab[0] = k
+
+            b = tk.Button(tab_bar, text=label,
+                          font=(FONT_UI, 9, "bold"),
+                          bg=SIDEBAR_BG, fg=TEXT_DIM,
+                          activebackground=PANEL_BG, activeforeground=TEXT_PRI,
+                          relief=tk.FLAT, bd=0, highlightthickness=0,
+                          padx=18, pady=9, cursor="hand2",
+                          command=_switch)
+            b.pack(side=tk.LEFT)
+            self._tab_btns[key] = b
+            return f, _switch
+
+        tab_names, sw_names = make_tab("names",  "  ✎  Device Names  ")
+        tab_wifi,  sw_wifi  = make_tab("wifi",   "  ⚙  WiFi Settings  ")
+
+        self._build_names_tab(tab_names)
+        self._build_wifi_tab(tab_wifi)
+
+        # Default tab
+        sw_names()
+
+    # ── Tab 1: Device Names ─────────────────────
+    def _build_names_tab(self, f: tk.Frame):
+        info = tk.Frame(f, bg=PANEL_BG, padx=24, pady=16)
+        info.pack(fill=tk.X)
+
+        tk.Label(info,
+                 text="Assign friendly names to devices.\n"
+                      "Names are saved locally and displayed throughout the app.\n"
+                      "Only devices that have been discovered or checked appear here.",
+                 font=(FONT_UI, 9), bg=PANEL_BG, fg=TEXT_SEC,
+                 justify=tk.LEFT, anchor="w").pack(anchor="w")
+
+        tk.Frame(f, bg=CARD_BORDER, height=1).pack(fill=tk.X, padx=20)
+
+        # Scrollable card list
+        canvas    = tk.Canvas(f, bg=PANEL_BG, bd=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(f, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(fill=tk.BOTH, expand=True)
+
+        self._names_inner = tk.Frame(canvas, bg=PANEL_BG)
+        cw = canvas.create_window((0, 0), window=self._names_inner, anchor="nw")
+
+        self._names_inner.bind("<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+            lambda e: canvas.itemconfig(cw, width=e.width))
+
+        self._names_canvas = canvas
+        self._names_cw     = cw
+        self._name_rows:   list[tk.Frame] = []
+
+        self.refresh_device_list()
+
+    def refresh_device_list(self):
+        """Rebuild name rows from known sessions."""
+        for w in self._names_inner.winfo_children():
+            w.destroy()
+        self._name_rows.clear()
+
+        macs = known_macs()
+        if not macs:
+            tk.Label(self._names_inner,
+                     text="No devices discovered yet.\nConnect devices or run Check on the OTA Flash page.",
+                     font=(FONT_UI, 10), bg=PANEL_BG, fg=TEXT_DIM
+                     ).pack(pady=40)
+            return
+
+        for mac in macs:
+            self._add_name_row(mac)
+
+    def _add_name_row(self, mac: str):
+        card = tk.Frame(self._names_inner, bg=CARD_BG,
+                        highlightthickness=1,
+                        highlightbackground=CARD_BORDER)
+        card.pack(fill=tk.X, padx=20, pady=(10, 0))
+
+        tk.Frame(card, bg=ACCENT_DIM, height=2).pack(fill=tk.X)
+
+        row = tk.Frame(card, bg=CARD_BG, padx=16, pady=12)
+        row.pack(fill=tk.X)
+
+        # MAC
+        left = tk.Frame(row, bg=CARD_BG)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 20))
+        tk.Label(left, text="MAC ADDRESS",
+                 font=(FONT_MONO, 7, "bold"),
+                 bg=CARD_BG, fg=TEXT_DIM, anchor="w").pack(anchor="w")
+        tk.Label(left, text=mac,
+                 font=(FONT_MONO, 10),
+                 bg=CARD_BG, fg=TEXT_SEC, anchor="w").pack(anchor="w")
+
+        # Name input
+        mid = tk.Frame(row, bg=CARD_BG)
+        mid.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(mid, text="FRIENDLY NAME",
+                 font=(FONT_MONO, 7, "bold"),
+                 bg=CARD_BG, fg=TEXT_DIM, anchor="w").pack(anchor="w")
+
+        inp_row = tk.Frame(mid, bg=CARD_BG)
+        inp_row.pack(fill=tk.X)
+        name_var = tk.StringVar(value=get_name(mac))
+        entry = tk.Entry(inp_row,
+                         textvariable=name_var,
+                         font=(FONT_UI, 11, "bold"),
+                         bg=INPUT_BG, fg=SUCCESS,
+                         insertbackground=TEXT_PRI,
+                         relief=tk.FLAT, bd=0,
+                         highlightthickness=1,
+                         highlightbackground=INPUT_BD,
+                         highlightcolor=INPUT_FOCUS,
+                         width=26)
+        entry.pack(side=tk.LEFT, ipady=5, ipadx=8)
+
+        def _save(m=mac, v=name_var):
+            n = v.get().strip()
+            if not n:
+                return
+            set_name(m, n)
+            _add_log(m, f"Name saved → \"{n}\"", ACCENT)
+            # Refresh other panels
+            if _info_panel:
+                root.after(50, _info_panel.refresh_device_list)
+            if _log_panel:
+                root.after(50, _log_panel.refresh_filter_menu)
+
+        _make_btn(inp_row, "Save", _save,
+                  bg=ACCENT_DIM, fg=ACCENT, padx=10, pady=5
+                  ).pack(side=tk.LEFT, padx=(8, 0))
+
+        self._name_rows.append(card)
+
+    # ── Tab 2: WiFi Settings ────────────────────
+    def _build_wifi_tab(self, f: tk.Frame):
+        info = tk.Frame(f, bg=PANEL_BG, padx=24, pady=14)
+        info.pack(fill=tk.X)
+        tk.Label(info,
+                 text="View and push WiFi credentials to ESP32 devices.\n"
+                      "Passwords are hidden — click Unlock and enter the admin passkey to reveal.\n"
+                      "Topic: <MAC>/wifi/set  →  {\"ssid\":\"…\",\"password\":\"…\"}",
+                 font=(FONT_UI, 9), bg=PANEL_BG, fg=TEXT_SEC,
+                 justify=tk.LEFT, anchor="w").pack(anchor="w")
+        tk.Frame(f, bg=CARD_BORDER, height=1).pack(fill=tk.X, padx=20)
+
+        # Device selector + form
+        body = tk.Frame(f, bg=PANEL_BG, padx=24, pady=16)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        # Device picker
+        tk.Label(body, text="SELECT DEVICE",
+                 font=(FONT_MONO, 7, "bold"),
+                 bg=PANEL_BG, fg=TEXT_DIM, anchor="w").pack(anchor="w")
+
+        pick_row = tk.Frame(body, bg=PANEL_BG)
+        pick_row.pack(fill=tk.X, pady=(4, 16))
+
+        self._wifi_mac_var = tk.StringVar(value="— select —")
+        self._wifi_mac_menu = tk.OptionMenu(pick_row, self._wifi_mac_var, "— select —")
+        self._wifi_mac_menu.config(
+            bg=MUTED, fg=TEXT_PRI,
+            activebackground=ACCENT_DIM, activeforeground=TEXT_PRI,
+            relief=tk.FLAT, bd=0, highlightthickness=0,
+            font=(FONT_MONO, 10), padx=12, pady=6)
+        self._wifi_mac_menu["menu"].config(
+            bg=CARD_BG, fg=TEXT_PRI,
+            activebackground=ACCENT_DIM,
+            activeforeground=TEXT_PRI,
+            relief=tk.FLAT, bd=0)
+        self._wifi_mac_menu.pack(side=tk.LEFT)
+
+        _make_btn(pick_row, "⬇  Request from Device",
+                  self._settings_request_wifi,
+                  bg=ACCENT_DIM, fg=ACCENT, padx=12, pady=6
+                  ).pack(side=tk.LEFT, padx=(12, 0))
+
+        # Admin unlock row
+        admin_row = tk.Frame(body, bg=PANEL_BG)
+        admin_row.pack(fill=tk.X, pady=(0, 14))
+        self._settings_admin_badge = tk.Label(admin_row,
+                                              text=" 🔒 PASSWORDS HIDDEN ",
+                                              font=(FONT_MONO, 7, "bold"),
+                                              bg=DANGER_DIM, fg=DANGER, padx=6)
+        self._settings_admin_badge.pack(side=tk.LEFT)
+        self._settings_unlock_btn = _make_btn(admin_row, "Unlock Passwords",
+                                              self._settings_request_admin,
+                                              bg=DANGER_DIM, fg=WARNING,
+                                              padx=10, pady=4)
+        self._settings_unlock_btn.pack(side=tk.LEFT, padx=(10, 0))
+
+        # SSID
+        tk.Label(body, text="SSID",
+                 font=(FONT_MONO, 7, "bold"),
+                 bg=PANEL_BG, fg=TEXT_DIM, anchor="w").pack(anchor="w")
+        self._settings_ssid_var = tk.StringVar()
+        tk.Entry(body,
+                 textvariable=self._settings_ssid_var,
+                 font=(FONT_MONO, 10),
+                 bg=INPUT_BG, fg=TEXT_PRI,
+                 insertbackground=TEXT_PRI,
+                 relief=tk.FLAT, bd=0,
+                 highlightthickness=1, highlightbackground=INPUT_BD,
+                 width=30
+                 ).pack(anchor="w", ipady=5, ipadx=6, pady=(4, 12))
+
+        # Password display (admin-unlock reveals plain text)
+        tk.Label(body, text="PASSWORD",
+                 font=(FONT_MONO, 7, "bold"),
+                 bg=PANEL_BG, fg=TEXT_DIM, anchor="w").pack(anchor="w")
+        pw_row2 = tk.Frame(body, bg=PANEL_BG)
+        pw_row2.pack(anchor="w", pady=(4, 16))
+        self._settings_pw_var = tk.StringVar()
+        self._settings_pw_entry = tk.Entry(pw_row2,
+                                           textvariable=self._settings_pw_var,
+                                           font=(FONT_MONO, 10),
+                                           bg=INPUT_BG, fg=TEXT_PRI,
+                                           insertbackground=TEXT_PRI,
+                                           show="●",
+                                           relief=tk.FLAT, bd=0,
+                                           highlightthickness=1,
+                                           highlightbackground=INPUT_BD,
+                                           state=tk.DISABLED,
+                                           disabledbackground=INPUT_BG,
+                                           disabledforeground=TEXT_DIM,
+                                           width=26)
+        self._settings_pw_entry.pack(side=tk.LEFT, ipady=5, ipadx=6)
+
+        # Apply WiFi Credentials button
+        _make_btn(body, "⬆  Apply WiFi Credentials",
+                  self._settings_push_wifi,
+                  bg="#1a3a1a", fg=SUCCESS, padx=14, pady=8
+                  ).pack(anchor="w")
+
+        self._settings_wifi_status = tk.Label(body, text="",
+                                              font=(FONT_UI, 9),
+                                              bg=PANEL_BG, fg=TEXT_SEC, anchor="w")
+        self._settings_wifi_status.pack(anchor="w", pady=(8, 0))
+
+        self._update_wifi_mac_menu()
+
+    def _update_wifi_mac_menu(self):
+        menu = self._wifi_mac_menu["menu"]
+        menu.delete(0, tk.END)
+        menu.add_command(label="— select —",
+                         command=lambda: self._wifi_mac_var.set("— select —"))
+        for mac in known_macs():
+            label = display_name_with_mac(mac)
+            m     = mac
+            menu.add_command(label=label,
+                             command=lambda v=m: self._wifi_mac_var.set(v))
+
+    def _settings_request_admin(self):
+        def _on_unlock():
+            self._admin_unlocked = True
+            # ── FIX: remove masking and enable entry on unlock ──
+            self._settings_pw_entry.config(state=tk.NORMAL, show="")
+            self._settings_admin_badge.config(
+                text=" 🔓 PASSWORDS VISIBLE ", bg="#0d2a0d", fg=SUCCESS)
+            self._settings_unlock_btn.config(
+                text="🔓 Unlocked", bg="#0d2a0d", fg=SUCCESS)
+        _ask_admin_passkey(_on_unlock)
+
+    def _settings_request_wifi(self):
+        mac = self._wifi_mac_var.get()
+        if mac in ("— select —", ""):
+            messagebox.showerror("No Device", "Select a device first.")
+            return
+        if not mqtt_client:
+            messagebox.showerror("Not Connected", "MQTT not ready.")
+            return
+        mqtt_client.subscribe(f"{mac}/wifi/config", qos=1)
+        mqtt_client.publish(f"{mac}/wifi/request", "GET_CONFIG", qos=COMMAND_QOS)
+        self._settings_wifi_status.config(
+            text="Requesting config from device…", fg=WARNING)
+        _add_log(mac, "WiFi config requested (Settings)", TEXT_SEC)
+
+    def _settings_push_wifi(self):
+        mac = self._wifi_mac_var.get()
+        if mac in ("— select —", ""):
+            messagebox.showerror("No Device", "Select a device first.")
+            return
+        if not mqtt_client:
+            messagebox.showerror("Not Connected", "MQTT not ready.")
+            return
+        ssid = self._settings_ssid_var.get().strip()
+        if not ssid:
+            messagebox.showerror("Missing SSID", "Enter the WiFi SSID.")
+            return
+
+        def _do_push(pw: str):
+            if not messagebox.askyesno("Apply WiFi Credentials",
+                    f"Send credentials to {display_name(mac)}?\n\nSSID: {ssid}"):
+                return
+            mqtt_client.publish(f"{mac}/wifi/set",
+                                json.dumps({"ssid": ssid, "password": pw}),
+                                qos=COMMAND_QOS)
+            self._settings_wifi_status.config(text="✓ Pushed to device", fg=SUCCESS)
+            _add_log(mac, f"WiFi credentials pushed  ssid={ssid}", SUCCESS)
+
+        _ask_wifi_password(_do_push)
+
+    def on_wifi_received(self, mac: str):
+        if self._wifi_mac_var.get() == mac:
+            session = get_session(mac)
+            if session:
+                self._settings_ssid_var.set(session.wifi_ssid)
+                if self._admin_unlocked:
+                    # ── FIX: show plain text if already unlocked ──
+                    self._settings_pw_var.set(session.wifi_password)
+                    self._settings_pw_entry.config(state=tk.NORMAL, show="")
+                else:
+                    self._settings_pw_var.set("")
+            self._settings_wifi_status.config(
+                text="✓ Received from device", fg=SUCCESS)
 
 # ─────────────────────────────────────────────
 #  GUI BUILD
 # ─────────────────────────────────────────────
-device_count_lbl: Optional[tk.Label] = None
-sb_dot:  Optional[tk.Label] = None
-sb_text: Optional[tk.Label] = None
-
 def _update_device_counter(n):
     if device_count_lbl:
         device_count_lbl.config(text=f"{n} device{'s' if n != 1 else ''}")
 
 def build_gui():
-    global device_count_lbl, sb_dot, sb_text, _log_panel
+    global device_count_lbl, sb_dot, sb_text
+    global _log_panel, _settings_panel, _info_panel
+
+    _load_names()
 
     win = tk.Tk()
     win.title("AceTech ESP32 OTA-FU  ·  Multi-Device")
-    win.geometry("900x740")
-    win.minsize(720, 520)
+    win.geometry("980x780")
+    win.minsize(760, 540)
     win.configure(bg=BG)
 
     # ── TITLEBAR ──────────────────────────────
@@ -1127,22 +1987,18 @@ def build_gui():
     body = tk.Frame(win, bg=BG)
     body.pack(fill=tk.BOTH, expand=True)
 
-    # ── SIDEBAR ───────────────────────────────
-    sidebar = tk.Frame(body, bg=SIDEBAR_BG, width=170)
+    sidebar = tk.Frame(body, bg=SIDEBAR_BG, width=180)
     sidebar.pack(side=tk.LEFT, fill=tk.Y)
     sidebar.pack_propagate(False)
     tk.Frame(sidebar, bg=CARD_BORDER, height=1).pack(fill=tk.X)
 
-    # ── MAIN CONTENT AREA (pages stacked) ─────
     content = tk.Frame(body, bg=PANEL_BG)
     content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-    # ══ PAGE: OTA Flash ══════════════════════
+    # ══ PAGE: OTA Flash ═══════════════════════
     page_ota = tk.Frame(content, bg=PANEL_BG)
-
     tk.Frame(page_ota, bg=CARD_BORDER, height=1).pack(fill=tk.X)
 
-    # OTA toolbar
     ota_toolbar = tk.Frame(page_ota, bg=PANEL_BG, padx=20, pady=12)
     ota_toolbar.pack(fill=tk.X)
 
@@ -1150,6 +2006,8 @@ def build_gui():
                                  font=(FONT_MONO, 9, "bold"),
                                  bg=PANEL_BG, fg=TEXT_SEC)
     device_count_lbl.pack(side=tk.LEFT, padx=(0, 20))
+
+    _manager_ref = [None]
 
     def tb_btn(parent, text, cmd, bg=MUTED, fg=TEXT_SEC):
         b = tk.Button(parent, text=text,
@@ -1160,9 +2018,6 @@ def build_gui():
                       padx=14, pady=6, cursor="hand2", command=cmd)
         b.pack(side=tk.RIGHT, padx=(6, 0))
         return b
-
-    # manager forward-ref
-    _manager_ref = [None]
 
     tb_btn(ota_toolbar, "⚡  Flash All",
            lambda: _manager_ref[0] and _manager_ref[0].flash_all(),
@@ -1176,10 +2031,8 @@ def build_gui():
 
     tk.Frame(page_ota, bg=CARD_BORDER, height=1).pack(fill=tk.X)
 
-    # Scrollable device list
-    canvas     = tk.Canvas(page_ota, bg=PANEL_BG, bd=0, highlightthickness=0)
-    scrollbar  = ttk.Scrollbar(page_ota, orient="vertical",
-                                command=canvas.yview)
+    canvas    = tk.Canvas(page_ota, bg=PANEL_BG, bd=0, highlightthickness=0)
+    scrollbar = ttk.Scrollbar(page_ota, orient="vertical", command=canvas.yview)
     canvas.configure(yscrollcommand=scrollbar.set)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
     canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -1214,20 +2067,20 @@ def build_gui():
         original_add()
     manager.add_row = patched_add
 
-    # ══ PAGE: Device Info (blank) ═════════════
-    page_info = _blank_panel(content, "◈",
-                              "Device Info",
-                              "Coming soon — live device telemetry & stats")
+    # ══ PAGE: Device Info ═════════════════════
+    page_info   = tk.Frame(content, bg=PANEL_BG)
+    info_panel  = DeviceInfoPanel(page_info)
+    _info_panel = info_panel
 
     # ══ PAGE: Logs ════════════════════════════
-    page_logs = tk.Frame(content, bg=PANEL_BG)
+    page_logs  = tk.Frame(content, bg=PANEL_BG)
     logs_panel = LogsPanel(page_logs)
     _log_panel = logs_panel
 
-    # ══ PAGE: Settings (blank) ════════════════
-    page_settings = _blank_panel(content, "⚙",
-                                  "Settings",
-                                  "Coming soon — broker config, chunk size, retries…")
+    # ══ PAGE: Settings ════════════════════════
+    page_settings  = tk.Frame(content, bg=PANEL_BG)
+    settings_panel = SettingsPanel(page_settings)
+    _settings_panel = settings_panel
 
     # ── PAGE SWITCHER ─────────────────────────
     pages = {
@@ -1241,21 +2094,42 @@ def build_gui():
     def show_page(key: str):
         if _active_page[0] == key:
             return
+
+        # ── Reset admin unlock when navigating away ──
+        prev = _active_page[0]
+        if prev == "info":
+            info_panel._admin_unlocked = False
+            info_panel._pw_entry.config(state=tk.DISABLED, show="●")
+            info_panel._pw_var.set("")
+            info_panel._admin_badge.config(
+                text=" 🔒 ADMIN LOCKED ", bg=DANGER_DIM, fg=DANGER)
+            info_panel._unlock_btn.config(
+                text="🔒 Unlock", bg=DANGER_DIM, fg=WARNING)
+        if prev == "settings":
+            settings_panel._admin_unlocked = False
+            settings_panel._settings_pw_entry.config(state=tk.DISABLED, show="●")
+            settings_panel._settings_pw_var.set("")
+            settings_panel._settings_admin_badge.config(
+                text=" 🔒 PASSWORDS HIDDEN ", bg=DANGER_DIM, fg=DANGER)
+            settings_panel._settings_unlock_btn.config(
+                text="Unlock Passwords", bg=DANGER_DIM, fg=WARNING)
+
         _active_page[0] = key
         for k, p in pages.items():
             if k == key:
                 p.pack(fill=tk.BOTH, expand=True)
             else:
                 p.pack_forget()
-        # Rebuild nav highlight
         _build_nav(key)
-        # Refresh log filter whenever logs page is opened
         if key == "logs":
             logs_panel.refresh_filter_menu()
+        if key == "info":
+            info_panel.refresh_device_list()
+        if key == "settings":
+            settings_panel.refresh_device_list()
+            settings_panel._update_wifi_mac_menu()
 
     # ── SIDEBAR NAV ───────────────────────────
-    _nav_frames: list[tk.Frame] = []
-
     NAV_ITEMS = [
         ("⬡", "OTA Flash",   "ota"),
         ("◈", "Device Info", "info"),
@@ -1265,7 +2139,6 @@ def build_gui():
 
     def _build_nav(active_key: str):
         for w in sidebar.winfo_children():
-            # Keep the top divider (first child); rebuild the rest
             if isinstance(w, tk.Frame) and w != sidebar.winfo_children()[0]:
                 w.destroy()
             elif isinstance(w, tk.Label):
@@ -1278,21 +2151,18 @@ def build_gui():
 
             row_frame = tk.Frame(sidebar, bg=bg, cursor="hand2")
             row_frame.pack(fill=tk.X)
-            tk.Frame(row_frame,
-                     bg=ACCENT if is_active else SIDEBAR_BG,
+            tk.Frame(row_frame, bg=ACCENT if is_active else SIDEBAR_BG,
                      width=3).pack(side=tk.LEFT, fill=tk.Y)
             lbl = tk.Label(row_frame,
                            text=f"  {icon}  {label}",
                            font=(FONT_UI, 9, "bold" if is_active else "normal"),
-                           bg=bg, fg=fg, anchor="w", pady=11,
-                           cursor="hand2")
+                           bg=bg, fg=fg, anchor="w", pady=11, cursor="hand2")
             lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-            k = key  # capture
+            k = key
             row_frame.bind("<Button-1>", lambda e, k=k: show_page(k))
             lbl.bind      ("<Button-1>", lambda e, k=k: show_page(k))
 
-        # Divider + broker info
         tk.Frame(sidebar, bg=CARD_BORDER, height=1).pack(fill=tk.X, pady=(10, 0))
         for lbl_text, val in [
             ("BROKER",      MQTT_BROKER),
@@ -1306,19 +2176,18 @@ def build_gui():
             tk.Label(sidebar, text=val,
                      font=(FONT_MONO, 8),
                      bg=SIDEBAR_BG, fg=TEXT_SEC, anchor="w",
-                     wraplength=140).pack(fill=tk.X, padx=14)
+                     wraplength=160).pack(fill=tk.X, padx=14)
 
-    # Initial page
     show_page("ota")
 
-    return win, manager, logs_panel
+    return win, manager
 
 
 # ─────────────────────────────────────────────
 #  ENTRY POINT
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    root, manager, logs_panel = build_gui()
+    root, manager = build_gui()
     root.after(200, _connect_mqtt)
     root.mainloop()
     if mqtt_client:
