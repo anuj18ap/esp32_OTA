@@ -8,11 +8,20 @@ String getDeviceID();
 // Builds all MQTT topics from the current device ID.
 void initTopics();
 
+// Loads device name and Wi-Fi credentials from NVS.
+void loadDeviceConfig();
+
 // Connects the ESP32 to the configured Wi-Fi network.
 void connectWiFi();
 
 // Publishes retained device firmware information.
 void publishDeviceInfo();
+
+// Republishes device info periodically for app rediscovery.
+void publishPeriodicDeviceInfo();
+
+// Routes MQTT messages for app device name and Wi-Fi management.
+bool handleDeviceConfigMessage(const String& topic, byte* payload, unsigned int length);
 
 // Publishes a formatted debug log to <deviceID>/log and mirrors it to Serial.
 void publishLog(const char* format, ...);

@@ -252,6 +252,12 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
         return;
     }
 
+    // Handles app-visible device name and Wi-Fi configuration topics.
+    if (handleDeviceConfigMessage(currentTopic, payload, length))
+    {
+        return;
+    }
+
     // Gives non-OTA topics to the relay and RGB automation handler.
     if (handleHomeAutomationMessage(currentTopic, payload, length))
     {

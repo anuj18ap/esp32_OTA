@@ -21,9 +21,17 @@ String topicOTAEnd;    // MQTT topic for OTA completion command.
 String topicOTAAck;    // MQTT topic for per-chunk acknowledgements.
 String topicOTAStatus; // MQTT topic for OTA status messages.
 String topicLog;       // MQTT topic for ESP32 debug log messages.
+String topicSetName;     // MQTT topic for saving the app-visible device name.
+String topicWifiRequest; // MQTT topic for requesting saved Wi-Fi credentials.
+String topicWifiConfig;  // MQTT topic for publishing saved Wi-Fi credentials.
+String topicWifiSet;     // MQTT topic for saving new Wi-Fi credentials.
+String deviceName;       // App-visible device name loaded from NVS.
+String currentWiFiSsid;  // Wi-Fi SSID loaded from NVS or the firmware default.
+String currentWiFiPass;  // Wi-Fi password loaded from NVS or the firmware default.
 
 unsigned long        previousLedMillis = 0;          // Last LED toggle timestamp.
 bool                 ledState          = false;      // Current LED output state.
+unsigned long        previousInfoMillis = 0;         // Last periodic device info publish timestamp.
 volatile OtaState    otaState          = OTA_IDLE;   // Current OTA receive state.
 uint32_t             expectedChunks    = 0;          // Number of chunks expected for the update.
 uint32_t             expectedCRC32     = 0;          // CRC32 value sent by the uploader.
@@ -50,6 +58,9 @@ void setup()
     // Reads the ESP32 MAC-based ID used for device-specific OTA topics.
     deviceID = getDeviceID();
     Serial.println("[DEVICE] MAC ID: " + deviceID);
+
+    // Loads persisted app-visible identity and Wi-Fi credentials before networking starts.
+    loadDeviceConfig();
 
     // Prepares relay outputs, button interrupts, and RGB PWM before networking starts.
     initializeHomeAutomation();
@@ -105,6 +116,9 @@ void loop()
 
     // Handles debounced physical button events for relay toggling.
     //processHomeAutomation();
+
+    // Keeps app auto-discovery fresh after the desktop app restarts.
+    publishPeriodicDeviceInfo();
 
     handleLedBlink();
 }

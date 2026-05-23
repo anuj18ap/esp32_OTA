@@ -21,9 +21,18 @@ extern String topicOTAEnd;    // MQTT topic for OTA completion command.
 extern String topicOTAAck;    // MQTT topic for chunk acknowledgements.
 extern String topicOTAStatus; // MQTT topic for OTA status messages.
 extern String topicLog;       // MQTT topic for ESP32 debug log messages.
+extern String topicSetName;     // MQTT topic for saving the app-visible device name.
+extern String topicWifiRequest; // MQTT topic for requesting saved Wi-Fi credentials.
+extern String topicWifiConfig;  // MQTT topic for publishing saved Wi-Fi credentials.
+extern String topicWifiSet;     // MQTT topic for saving new Wi-Fi credentials.
+
+extern String deviceName;      // App-visible device name loaded from NVS.
+extern String currentWiFiSsid; // Wi-Fi SSID loaded from NVS or the firmware default.
+extern String currentWiFiPass; // Wi-Fi password loaded from NVS or the firmware default.
 
 extern unsigned long previousLedMillis; // Last LED toggle timestamp.
 extern bool          ledState;          // Current heartbeat LED state.
+extern unsigned long previousInfoMillis; // Last periodic device info publish timestamp.
 
 extern volatile OtaState otaState; // Shared OTA state flag.
 extern uint32_t expectedChunks;    // Expected firmware chunk count.

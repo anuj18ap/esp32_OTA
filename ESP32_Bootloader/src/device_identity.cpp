@@ -52,4 +52,12 @@ void initTopics()
 
     // Topic for publishing ESP32 debug log strings.
     topicLog = deviceID + "/log";
+
+    // Topic for receiving a plain-text device name from the app.
+    topicSetName = deviceID + "/set_name";
+
+    // Topics for Wi-Fi credential requests and updates.
+    topicWifiRequest = deviceID + "/wifi/request";
+    topicWifiConfig = deviceID + "/wifi/config";
+    topicWifiSet = deviceID + "/wifi/set";
 }
