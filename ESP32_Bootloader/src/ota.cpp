@@ -34,6 +34,7 @@ void publishAck(uint32_t chunkIndex)
     mqttClient.publish(topicOTAAck.c_str(), buffer, false);
     // Flushes MQTT immediately to keep the chunk transfer moving.
     mqttClient.loop();
+    Serial.printf("[OTA] ACK -> chunk %u\n", chunkIndex);
 }
 
 /***********************************************************
@@ -96,7 +97,10 @@ return-type void
 void handleOtaChunk(const uint8_t* payload, unsigned int len)
 {
     if (otaState != OTA_RECEIVING)
+    {
+        Serial.printf("[OTA] Chunk ignored - state=%d len=%u\n", otaState, len);
         return;
+    }
 
     // Rejects packets that cannot contain the 4-byte index plus data.
     if (len < 5)
@@ -122,6 +126,7 @@ void handleOtaChunk(const uint8_t* payload, unsigned int len)
     // Points past the 4-byte chunk index to the firmware bytes.
     const uint8_t* chunkData = payload + 4;
     unsigned int   chunkLen  = len - 4;
+    Serial.printf("[OTA] RX chunk %u len=%u\n", chunkIndex, chunkLen);
 
     // Accumulate CRC32 over raw firmware bytes as they arrive.
     // crc32_le is the ESP32 ROM CRC; use our software fallback instead
@@ -142,6 +147,7 @@ void handleOtaChunk(const uint8_t* payload, unsigned int len)
     // Stores progress after a successful flash write.
     lastChunkIndex = chunkIndex;
     chunksReceived++;
+    Serial.printf("[OTA] Wrote chunk %u (%u bytes)\n", chunkIndex, written);
     publishAck(chunkIndex);
 
     // Prints progress every 20 chunks and on the final chunk.
@@ -225,6 +231,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
     if (currentTopic == topicOTABegin)
     {
         // Starts OTA when metadata arrives from the uploader.
+        Serial.printf("[MQTT] OTA BEGIN topic received (%u bytes)\n", length);
         handleOtaBegin(payload, length);
         return;
     }
@@ -232,6 +239,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
     if (currentTopic == topicOTAChunk)
     {
         // Writes each binary OTA chunk to the update partition.
+        Serial.printf("[MQTT] OTA CHUNK topic received (%u bytes)\n", length);
         handleOtaChunk(payload, length);
         return;
     }
@@ -239,6 +247,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
     if (currentTopic == topicOTAEnd)
     {
         // Finalizes OTA after the uploader sends the end command.
+        Serial.printf("[MQTT] OTA END topic received (%u bytes)\n", length);
         handleOtaEnd();
         return;
     }

@@ -42,9 +42,9 @@ void setup()
     Serial.begin(115200);
     delay(300);
 
-    Serial.println("\n=============================");
+    Serial.println("\n=================================");
     Serial.printf("  ESP32 Home Automation + OTA  v%s\n", FW_VERSION);
-    Serial.println("=============================");
+    Serial.println("===================================");
 
     // Reads the ESP32 MAC-based ID used for device-specific OTA topics.
     deviceID = getDeviceID();
@@ -103,5 +103,7 @@ void loop()
     mqttClient.loop();
 
     // Handles debounced physical button events for relay toggling.
-    processHomeAutomation();
+    //processHomeAutomation();
+
+    handleLedBlink();
 }

@@ -68,13 +68,18 @@ void connectMQTT()
         if (mqttClient.connect(clientId.c_str()))
         {
             Serial.println(" connected.");
+            Serial.printf("[MQTT] Client ID: %s\n", clientId.c_str());
             publishDeviceInfo();
             // Subscribes to the OTA handshake, metadata, chunk, and end topics.
             mqttClient.subscribe(topicOTACheck.c_str(), 1);
+            Serial.println("[MQTT] Subscribed OTA check topic.");
             mqttClient.subscribe(topicOTABegin.c_str(), 1);
+            Serial.println("[MQTT] Subscribed OTA begin topic.");
             // Uses QoS 0 for OTA chunks because the custom ACK/retry handles reliability faster.
             mqttClient.subscribe(topicOTAChunk.c_str(), 0);
+            Serial.println("[MQTT] Subscribed OTA chunk topic with QoS 0.");
             mqttClient.subscribe(topicOTAEnd.c_str(), 1);
+            Serial.println("[MQTT] Subscribed OTA end topic.");
             // Subscribes to home automation command topics after MQTT reconnects.
             subscribeHomeAutomationTopics();
             // Publishes retained relay and RGB states for MQTT dashboard sync.

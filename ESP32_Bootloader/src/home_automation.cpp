@@ -382,8 +382,11 @@ return-type void
 void subscribeHomeAutomationTopics()
 {
     mqttClient.subscribe(TOPIC_RELAY_SET, 1);
+    Serial.println("[MQTT] Subscribed relay set topic.");
     mqttClient.subscribe(TOPIC_RGB1_SET, 1);
+    Serial.println("[MQTT] Subscribed RGB1 set topic.");
     mqttClient.subscribe(TOPIC_RGB2_SET, 1);
+    Serial.println("[MQTT] Subscribed RGB2 set topic.");
 }
 
 /***********************************************************
@@ -394,6 +397,7 @@ return-type void
 ************************************************************/
 void publishHomeAutomationState()
 {
+    Serial.println("[HOME] Publishing retained automation state.");
     publishRelayStatus();
     publishRGB(0);
     publishRGB(1);
@@ -409,6 +413,9 @@ return-type bool - true when the topic was handled
 ************************************************************/
 bool handleHomeAutomationMessage(const String& topic, byte* payload, unsigned int length)
 {
+    Serial.printf("[MQTT] Automation topic received: %s (%u bytes)\n",
+                  topic.c_str(), length);
+
     // Handles relay bitmask commands from MQTT.
     if (topic == TOPIC_RELAY_SET)
     {
