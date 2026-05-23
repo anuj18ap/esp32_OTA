@@ -179,7 +179,7 @@ static void publishRGB(uint8_t idx)
 
     const char* topic = (idx == 0) ? TOPIC_RGB1_STATUS : TOPIC_RGB2_STATUS;
     mqttClient.publish(topic, buffer, true);
-    Serial.printf("[MQTT] pub %s -> %s\n", topic, buffer);
+    publishLog("[MQTT] pub %s -> %s", topic, buffer);
 }
 
 /***********************************************************
@@ -264,7 +264,7 @@ static void publishRelayStatus()
 {
     uint8_t mask = buildRelayByte();
     mqttClient.publish(TOPIC_RELAY_STATUS, &mask, 1, true);
-    Serial.printf("[MQTT] pub relay/status -> 0x%02X\n", mask);
+    publishLog("[MQTT] pub relay/status -> 0x%02X", mask);
 }
 
 /***********************************************************
@@ -283,7 +283,7 @@ static void applyRelayByte(uint8_t mask)
         // Stores and applies the new relay state.
         channels[i].on = on;
         writeOutput(i, on);
-        Serial.printf("[RELAY] ch%u -> %s\n", i + 1, on ? "ON" : "OFF");
+        publishLog("[RELAY] ch%u -> %s", i + 1, on ? "ON" : "OFF");
     }
     publishRelayStatus();
 }
@@ -298,8 +298,8 @@ static void toggleChannel(uint8_t ch)
 {
     channels[ch].on = !channels[ch].on;
     writeOutput(ch, channels[ch].on);
-    Serial.printf("[BTN] ch%u toggled -> %s\n", ch + 1,
-                  channels[ch].on ? "ON" : "OFF");
+    publishLog("[BTN] ch%u toggled -> %s", ch + 1,
+               channels[ch].on ? "ON" : "OFF");
     publishRelayStatus();
 }
 
@@ -370,7 +370,7 @@ void initializeHomeAutomation()
         applyRGB(i);
     }
 
-    Serial.println("[HOME] Relay and RGB hardware initialized.");
+    publishLog("[HOME] Relay and RGB hardware initialized.");
 }
 
 /***********************************************************
@@ -382,11 +382,11 @@ return-type void
 void subscribeHomeAutomationTopics()
 {
     mqttClient.subscribe(TOPIC_RELAY_SET, 1);
-    Serial.println("[MQTT] Subscribed relay set topic.");
+    publishLog("[MQTT] Subscribed relay set topic.");
     mqttClient.subscribe(TOPIC_RGB1_SET, 1);
-    Serial.println("[MQTT] Subscribed RGB1 set topic.");
+    publishLog("[MQTT] Subscribed RGB1 set topic.");
     mqttClient.subscribe(TOPIC_RGB2_SET, 1);
-    Serial.println("[MQTT] Subscribed RGB2 set topic.");
+    publishLog("[MQTT] Subscribed RGB2 set topic.");
 }
 
 /***********************************************************
@@ -397,7 +397,7 @@ return-type void
 ************************************************************/
 void publishHomeAutomationState()
 {
-    Serial.println("[HOME] Publishing retained automation state.");
+    publishLog("[HOME] Publishing retained automation state.");
     publishRelayStatus();
     publishRGB(0);
     publishRGB(1);
@@ -413,8 +413,8 @@ return-type bool - true when the topic was handled
 ************************************************************/
 bool handleHomeAutomationMessage(const String& topic, byte* payload, unsigned int length)
 {
-    Serial.printf("[MQTT] Automation topic received: %s (%u bytes)\n",
-                  topic.c_str(), length);
+    publishLog("[MQTT] Automation topic received: %s (%u bytes)",
+               topic.c_str(), length);
 
     // Handles relay bitmask commands from MQTT.
     if (topic == TOPIC_RELAY_SET)
@@ -422,7 +422,7 @@ bool handleHomeAutomationMessage(const String& topic, byte* payload, unsigned in
         if (length >= 1)
         {
             uint8_t mask = payload[0];
-            Serial.printf("[MQTT] relay set -> 0x%02X\n", mask);
+            publishLog("[MQTT] relay set -> 0x%02X", mask);
             applyRelayByte(mask);
         }
         return true;
@@ -443,12 +443,12 @@ bool handleHomeAutomationMessage(const String& topic, byte* payload, unsigned in
             rgb[idx] = {red, green, blue};
             applyRGB(idx);
             publishRGB(idx);
-            Serial.printf("[RGB%u] set -> R=%u G=%u B=%u\n",
-                          idx + 1, red, green, blue);
+            publishLog("[RGB%u] set -> R=%u G=%u B=%u",
+                       idx + 1, red, green, blue);
         }
         else
         {
-            Serial.println("[RGB] bad payload - expected R,G,B (0-100)");
+            publishLog("[RGB] bad payload - expected R,G,B (0-100)");
         }
         return true;
     }

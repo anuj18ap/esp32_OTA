@@ -14,7 +14,7 @@ void connectWiFi()
     if (WiFi.status() == WL_CONNECTED) return;
 
     // Prints the SSID being used for the connection attempt.
-    Serial.printf("[WiFi] Connecting to %s", WIFI_SSID);
+    publishLog("[WiFi] Connecting to %s", WIFI_SSID);
 
     // Forces station mode and starts the Wi-Fi connection.
     WiFi.mode(WIFI_STA);
@@ -28,9 +28,7 @@ void connectWiFi()
     }
 
     // Prints the assigned local IP address after connection.
-    Serial.println();
-    Serial.print("[WiFi] Connected. IP: ");
-    Serial.println(WiFi.localIP());
+    publishLog("[WiFi] Connected. IP: %s", WiFi.localIP().toString().c_str());
 }
 
 /***********************************************************
@@ -46,7 +44,7 @@ void publishDeviceInfo()
                    + "\",\"id\":\"" + deviceID + "\"}";
     // Publishes the payload as a retained message.
     mqttClient.publish(topicInfo.c_str(), payload.c_str(), true);
-    Serial.println("[MQTT] Listening on MAC: " + deviceID);
+    publishLog("[MQTT] Listening on MAC: %s", deviceID.c_str());
 }
 
 /***********************************************************
@@ -60,37 +58,37 @@ void connectMQTT()
     // Keeps trying until the MQTT connection succeeds.
     while (!mqttClient.connected())
     {
-        Serial.print("[MQTT] Connecting...");
+        publishLog("[MQTT] Connecting...");
         // Builds a unique MQTT client ID for this device.
         String clientId = "ESP32-" + deviceID;
 
         // Connects to the broker and restores subscriptions on success.
         if (mqttClient.connect(clientId.c_str()))
         {
-            Serial.println(" connected.");
-            Serial.printf("[MQTT] Client ID: %s\n", clientId.c_str());
+            publishLog("[MQTT] Connected.");
+            publishLog("[MQTT] Client ID: %s", clientId.c_str());
             publishDeviceInfo();
             // Subscribes to the OTA handshake, metadata, chunk, and end topics.
             mqttClient.subscribe(topicOTACheck.c_str(), 1);
-            Serial.println("[MQTT] Subscribed OTA check topic.");
+            publishLog("[MQTT] Subscribed OTA check topic.");
             mqttClient.subscribe(topicOTABegin.c_str(), 1);
-            Serial.println("[MQTT] Subscribed OTA begin topic.");
+            publishLog("[MQTT] Subscribed OTA begin topic.");
             // Uses QoS 0 for OTA chunks because the custom ACK/retry handles reliability faster.
             mqttClient.subscribe(topicOTAChunk.c_str(), 0);
-            Serial.println("[MQTT] Subscribed OTA chunk topic with QoS 0.");
+            publishLog("[MQTT] Subscribed OTA chunk topic with QoS 0.");
             mqttClient.subscribe(topicOTAEnd.c_str(), 1);
-            Serial.println("[MQTT] Subscribed OTA end topic.");
+            publishLog("[MQTT] Subscribed OTA end topic.");
             // Subscribes to home automation command topics after MQTT reconnects.
             subscribeHomeAutomationTopics();
             // Publishes retained relay and RGB states for MQTT dashboard sync.
             publishHomeAutomationState();
-            Serial.println("[MQTT] Subscribed.");
+            publishLog("[MQTT] Subscribed.");
         }
         else
         {
             // Waits before retrying if the broker connection fails.
-            Serial.printf(" failed (rc=%d). Retrying...\n",
-                          mqttClient.state());
+            publishLog("[MQTT] Failed (rc=%d). Retrying...",
+                       mqttClient.state());
             delay(MQTT_RETRY_DELAY);
         }
     }

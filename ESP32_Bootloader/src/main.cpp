@@ -20,6 +20,7 @@ String topicOTAChunk;  // MQTT topic for OTA firmware chunks.
 String topicOTAEnd;    // MQTT topic for OTA completion command.
 String topicOTAAck;    // MQTT topic for per-chunk acknowledgements.
 String topicOTAStatus; // MQTT topic for OTA status messages.
+String topicLog;       // MQTT topic for ESP32 debug log messages.
 
 unsigned long        previousLedMillis = 0;          // Last LED toggle timestamp.
 bool                 ledState          = false;      // Current LED output state.
@@ -42,9 +43,9 @@ void setup()
     Serial.begin(115200);
     delay(300);
 
-    Serial.println("\n=================================");
-    Serial.printf("  ESP32 Home Automation + OTA  v%s\n", FW_VERSION);
-    Serial.println("===================================");
+    publishLog("=================================");
+    publishLog("ESP32 Home Automation + OTA v%s", FW_VERSION);
+    publishLog("=================================");
 
     // Reads the ESP32 MAC-based ID used for device-specific OTA topics.
     deviceID = getDeviceID();
@@ -77,7 +78,7 @@ void setup()
     // Connects MQTT and subscribes to OTA plus home automation topics.
     connectMQTT();
 
-    Serial.println("[SETUP] Ready - automation and OTA online.");
+    publishLog("[SETUP] Ready - automation and OTA online.");
 }
 
 /***********************************************************
@@ -91,7 +92,7 @@ void loop()
     // Reconnects Wi-Fi if the station disconnects from the router.
     if (WiFi.status() != WL_CONNECTED)
     {
-        Serial.println("[WiFi] Lost - reconnecting...");
+        publishLog("[WiFi] Lost - reconnecting...");
         connectWiFi();
     }
 

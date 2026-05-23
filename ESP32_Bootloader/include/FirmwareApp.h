@@ -14,6 +14,9 @@ void connectWiFi();
 // Publishes retained device firmware information.
 void publishDeviceInfo();
 
+// Publishes a formatted debug log to <deviceID>/log and mirrors it to Serial.
+void publishLog(const char* format, ...);
+
 // Publishes OTA status text to the status topic.
 void publishStatus(const char* status);
 

@@ -49,4 +49,7 @@ void initTopics()
 
     // Topic for publishing OTA status messages.
     topicOTAStatus = deviceID + "/ota_status";
+
+    // Topic for publishing ESP32 debug log strings.
+    topicLog = deviceID + "/log";
 }

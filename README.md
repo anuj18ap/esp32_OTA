@@ -24,6 +24,7 @@ The desktop uploader in `Firmware_PythonFiles` provides a small Tkinter GUI that
 - `ESP32_Bootloader/src/network.cpp` - Wi-Fi connection, MQTT connection, subscriptions, and device info publishing.
 - `ESP32_Bootloader/src/ota.cpp` - OTA begin, chunk write, ACK, CRC check, end, status, and MQTT callback handling.
 - `ESP32_Bootloader/src/home_automation.cpp` - 8 relay channels, button ISRs, RGB PWM control, and automation MQTT handlers.
+- `ESP32_Bootloader/src/logger.cpp` - publishes ESP32 debug strings to `<deviceID>/log`.
 - `ESP32_Bootloader/src/device_identity.cpp` - ESP32 MAC-based device ID and MQTT topic generation.
 - `ESP32_Bootloader/src/led.cpp` - legacy heartbeat helper, not called while GPIO2 is used as relay channel 8.
 - `Firmware_PythonFiles/Firmware_Upgrader_V0.2.py` - MQTT OTA uploader GUI.
@@ -42,6 +43,7 @@ The desktop uploader in `Firmware_PythonFiles` provides a small Tkinter GUI that
 - Publishes per-chunk ACKs on `<deviceID>/ota/ack`.
 - Verifies CRC32 before finalising the flash update.
 - Publishes OTA status on `<deviceID>/ota_status`.
+- Publishes ESP32 debug logs on `<deviceID>/log`.
 
 ## MQTT Topics
 
@@ -67,6 +69,7 @@ OTA topics use the ESP32 MAC-derived device ID as the prefix.
 | `<deviceID>/ota/chunk` | Uploader to ESP32 | One firmware chunk with a 4-byte chunk index |
 | `<deviceID>/ota/end` | Uploader to ESP32 | Transfer completion command |
 | `<deviceID>/ota/ack` | ESP32 to uploader | Acknowledgement for the written chunk index |
+| `<deviceID>/log` | ESP32 to app | Debug log string from ESP32 firmware |
 
 ## Automation Payloads
 
@@ -184,6 +187,7 @@ Python uploader:
 ## Notes
 
 - The uploader sends one chunk at a time and waits for the ESP32 ACK before continuing.
+- ESP32 runtime debug logs are published to `<deviceID>/log` and mirrored to USB Serial.
 - The ESP32 skips a duplicate of the last received chunk and re-sends its ACK.
 - CRC32 is calculated by the Python uploader and verified by the ESP32 before rebooting.
 - GPIO2 is used by relay channel 8, so the old heartbeat LED loop is not called in the merged firmware.

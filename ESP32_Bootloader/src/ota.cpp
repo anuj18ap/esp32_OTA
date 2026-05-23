@@ -16,7 +16,7 @@ void publishStatus(const char* status)
     mqttClient.publish(topicOTAStatus.c_str(), status, false);
     // Flushes MQTT immediately so status is not delayed by the main loop.
     mqttClient.loop();
-    Serial.printf("[MQTT] Status -> %s\n", status);
+    publishLog("[MQTT] Status -> %s", status);
 }
 
 /***********************************************************
@@ -34,7 +34,7 @@ void publishAck(uint32_t chunkIndex)
     mqttClient.publish(topicOTAAck.c_str(), buffer, false);
     // Flushes MQTT immediately to keep the chunk transfer moving.
     mqttClient.loop();
-    Serial.printf("[OTA] ACK -> chunk %u\n", chunkIndex);
+    publishLog("[OTA] ACK -> chunk %u", chunkIndex);
 }
 
 /***********************************************************
@@ -48,7 +48,7 @@ void handleOtaBegin(const uint8_t* payload, unsigned int len)
 {
     if (otaState != OTA_IDLE)
     {
-        Serial.println("[OTA] BEGIN ignored - already receiving.");
+        publishLog("[OTA] BEGIN ignored - already receiving.");
         return;
     }
 
@@ -56,7 +56,7 @@ void handleOtaBegin(const uint8_t* payload, unsigned int len)
     DeserializationError error = deserializeJson(document, payload, len);
     if (error)
     {
-        Serial.printf("[OTA] JSON error: %s\n", error.c_str());
+        publishLog("[OTA] JSON error: %s", error.c_str());
         publishStatus("FAILED");
         return;
     }
@@ -71,20 +71,20 @@ void handleOtaBegin(const uint8_t* payload, unsigned int len)
     //runningCRC32 = 0;
     runningCRC32 = 0xFFFFFFFF;
 
-    Serial.printf("[OTA] BEGIN  size=%u  chunks=%u  crc32=0x%08X\n",
-                  totalSize, expectedChunks, expectedCRC32);
-    Serial.printf("[OTA] Free sketch space: %u\n", ESP.getFreeSketchSpace());
+    publishLog("[OTA] BEGIN size=%u chunks=%u crc32=0x%08X",
+               totalSize, expectedChunks, expectedCRC32);
+    publishLog("[OTA] Free sketch space: %u", ESP.getFreeSketchSpace());
 
     if (!Update.begin(UPDATE_SIZE_UNKNOWN))
     {
-        Serial.printf("[OTA] Update.begin() error: %s\n", Update.errorString());
+        publishLog("[OTA] Update.begin() error: %s", Update.errorString());
         publishStatus("FAILED");
         return;
     }
 
     otaState = OTA_RECEIVING;
     publishStatus("UPDATING");
-    Serial.println("[OTA] Ready to receive chunks.");
+    publishLog("[OTA] Ready to receive chunks.");
 }
 
 /***********************************************************
@@ -98,14 +98,14 @@ void handleOtaChunk(const uint8_t* payload, unsigned int len)
 {
     if (otaState != OTA_RECEIVING)
     {
-        Serial.printf("[OTA] Chunk ignored - state=%d len=%u\n", otaState, len);
+        publishLog("[OTA] Chunk ignored - state=%d len=%u", otaState, len);
         return;
     }
 
     // Rejects packets that cannot contain the 4-byte index plus data.
     if (len < 5)
     {
-        Serial.println("[OTA] Chunk too short.");
+        publishLog("[OTA] Chunk too short.");
         return;
     }
 
@@ -118,7 +118,7 @@ void handleOtaChunk(const uint8_t* payload, unsigned int len)
     // Re-ACK duplicates without re-writing them.
     if (chunkIndex == lastChunkIndex)
     {
-        Serial.printf("[OTA] Duplicate chunk %u - re-ACKing.\n", chunkIndex);
+        publishLog("[OTA] Duplicate chunk %u - re-ACKing.", chunkIndex);
         publishAck(chunkIndex);
         return;
     }
@@ -126,7 +126,7 @@ void handleOtaChunk(const uint8_t* payload, unsigned int len)
     // Points past the 4-byte chunk index to the firmware bytes.
     const uint8_t* chunkData = payload + 4;
     unsigned int   chunkLen  = len - 4;
-    Serial.printf("[OTA] RX chunk %u len=%u\n", chunkIndex, chunkLen);
+    publishLog("[OTA] RX chunk %u len=%u", chunkIndex, chunkLen);
 
     // Accumulate CRC32 over raw firmware bytes as they arrive.
     // crc32_le is the ESP32 ROM CRC; use our software fallback instead
@@ -136,8 +136,8 @@ void handleOtaChunk(const uint8_t* payload, unsigned int len)
     size_t written = Update.write(const_cast<uint8_t*>(chunkData), chunkLen);
     if (written != chunkLen)
     {
-        Serial.printf("[OTA] Write error chunk %u: wrote %u of %u\n",
-                      chunkIndex, written, chunkLen);
+        publishLog("[OTA] Write error chunk %u: wrote %u of %u",
+                   chunkIndex, written, chunkLen);
         Update.abort();
         otaState = OTA_IDLE;
         publishStatus("FAILED");
@@ -147,15 +147,15 @@ void handleOtaChunk(const uint8_t* payload, unsigned int len)
     // Stores progress after a successful flash write.
     lastChunkIndex = chunkIndex;
     chunksReceived++;
-    Serial.printf("[OTA] Wrote chunk %u (%u bytes)\n", chunkIndex, written);
+    publishLog("[OTA] Wrote chunk %u (%u bytes)", chunkIndex, written);
     publishAck(chunkIndex);
 
     // Prints progress every 20 chunks and on the final chunk.
     if (chunkIndex % 20 == 0 || chunkIndex == expectedChunks - 1)
     {
         uint8_t pct = (uint8_t)((chunksReceived * 100UL) / expectedChunks);
-        Serial.printf("[OTA] Chunk %u/%u (%u%%)\n",
-                      chunksReceived, expectedChunks, pct);
+        publishLog("[OTA] Chunk %u/%u (%u%%)",
+                   chunksReceived, expectedChunks, pct);
     }
 
     yield();
@@ -171,37 +171,37 @@ void handleOtaEnd()
 {
     if (otaState != OTA_RECEIVING)
     {
-        Serial.println("[OTA] END ignored - not in RECEIVING state.");
+        publishLog("[OTA] END ignored - not in RECEIVING state.");
         return;
     }
 
-    Serial.printf("[OTA] END - received %u/%u chunks\n",
-                  chunksReceived, expectedChunks);
+    publishLog("[OTA] END - received %u/%u chunks",
+               chunksReceived, expectedChunks);
 
     // ── CRC32 verification ────────────────────────────────────────────────
     // Finalise the CRC (XOR with 0xFFFFFFFF to match zlib convention).
     uint32_t finalCRC = runningCRC32 ^ 0xFFFFFFFF;
     if (finalCRC != expectedCRC32)
     {
-        Serial.printf("[OTA] CRC32 MISMATCH  got=0x%08X  expected=0x%08X\n",
-                      finalCRC, expectedCRC32);
+        publishLog("[OTA] CRC32 MISMATCH got=0x%08X expected=0x%08X",
+                   finalCRC, expectedCRC32);
         Update.abort();
         otaState = OTA_IDLE;
         publishStatus("FAILED");
         return;
     }
-    Serial.printf("[OTA] CRC32 OK  (0x%08X)\n", finalCRC);
+    publishLog("[OTA] CRC32 OK (0x%08X)", finalCRC);
 
     // ── Finalise flash ────────────────────────────────────────────────────
     if (!Update.end(true))
     {
-        Serial.printf("[OTA] Update.end() error: %s\n", Update.errorString());
+        publishLog("[OTA] Update.end() error: %s", Update.errorString());
         otaState = OTA_IDLE;
         publishStatus("FAILED");
         return;
     }
 
-    Serial.println("[OTA] Flash verified OK - rebooting in 1s...");
+    publishLog("[OTA] Flash verified OK - rebooting in 1s...");
     publishStatus("SUCCESS");
     mqttClient.loop();
     delay(1000);
@@ -222,7 +222,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
     if (currentTopic == topicOTACheck)
     {
         // Answers the uploader readiness probe before OTA begins.
-        Serial.println("[MQTT] CHECK -> READY");
+        publishLog("[MQTT] CHECK -> READY");
         publishStatus("READY");
         publishDeviceInfo();
         return;
@@ -231,7 +231,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
     if (currentTopic == topicOTABegin)
     {
         // Starts OTA when metadata arrives from the uploader.
-        Serial.printf("[MQTT] OTA BEGIN topic received (%u bytes)\n", length);
+        publishLog("[MQTT] OTA BEGIN topic received (%u bytes)", length);
         handleOtaBegin(payload, length);
         return;
     }
@@ -239,7 +239,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
     if (currentTopic == topicOTAChunk)
     {
         // Writes each binary OTA chunk to the update partition.
-        Serial.printf("[MQTT] OTA CHUNK topic received (%u bytes)\n", length);
+        publishLog("[MQTT] OTA CHUNK topic received (%u bytes)", length);
         handleOtaChunk(payload, length);
         return;
     }
@@ -247,7 +247,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
     if (currentTopic == topicOTAEnd)
     {
         // Finalizes OTA after the uploader sends the end command.
-        Serial.printf("[MQTT] OTA END topic received (%u bytes)\n", length);
+        publishLog("[MQTT] OTA END topic received (%u bytes)", length);
         handleOtaEnd();
         return;
     }
@@ -258,5 +258,5 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
         return;
     }
 
-    Serial.println("[MQTT] Unhandled topic: " + currentTopic);
+    publishLog("[MQTT] Unhandled topic: %s", currentTopic.c_str());
 }

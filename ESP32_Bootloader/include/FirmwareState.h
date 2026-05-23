@@ -20,6 +20,7 @@ extern String topicOTAChunk;  // MQTT topic for OTA firmware chunks.
 extern String topicOTAEnd;    // MQTT topic for OTA completion command.
 extern String topicOTAAck;    // MQTT topic for chunk acknowledgements.
 extern String topicOTAStatus; // MQTT topic for OTA status messages.
+extern String topicLog;       // MQTT topic for ESP32 debug log messages.
 
 extern unsigned long previousLedMillis; // Last LED toggle timestamp.
 extern bool          ledState;          // Current heartbeat LED state.
