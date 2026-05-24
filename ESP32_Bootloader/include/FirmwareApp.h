@@ -23,6 +23,12 @@ void publishPeriodicDeviceInfo();
 // Routes MQTT messages for app device name and Wi-Fi management.
 bool handleDeviceConfigMessage(const String& topic, byte* payload, unsigned int length);
 
+// Encrypts a text MQTT payload using the shared app/device key.
+String encryptMqttPayload(const String& plainText);
+
+// Decrypts a text MQTT payload, accepting plain text for transition compatibility.
+bool decryptMqttPayload(const byte* payload, unsigned int length, String& plainText);
+
 // Publishes a formatted debug log to <deviceID>/log and mirrors it to Serial.
 void publishLog(const char* format, ...);
 

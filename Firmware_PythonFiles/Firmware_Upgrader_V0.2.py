@@ -6,28 +6,28 @@
  Python 3.8+  |  paho-mqtt 2.x
 
  ── MQTT Topics (ESP32 → App) ──────────────────────────────────
-   <MAC>/info            JSON  {"id":"<MAC>","firmware":"<ver>","name":"<name>"}
+   <MAC>/info            ENC1  encrypted JSON  {"id":"<MAC>","firmware":"<ver>","name":"<name>"}
    <MAC>/ota_status      str   READY | UPDATING | FAILED | NO_UPDATE | SUCCESS
    <MAC>/ota/ack         str   "<chunk_index>"
-   <MAC>/log             str   any log line
-   <MAC>/wifi/config     JSON  {"ssid":"<s>","password":"<p>"}   (reply to request)
+   <MAC>/log             ENC1  encrypted log line
+   <MAC>/wifi/config     ENC1  encrypted JSON  {"ssid":"<s>","password":"<p>"}
 
  ── MQTT Topics (App → ESP32) ──────────────────────────────────
    <MAC>/ota_check       "ARE_YOU_READY"
    <MAC>/ota/begin       JSON  {"size":N,"chunks":N,"crc32":N}
    <MAC>/ota/chunk       binary [4-byte big-endian index][data]
    <MAC>/ota/end         "END"
-   <MAC>/set_name        str   "My Device Label"   (ESP32 saves to NVS)
-   <MAC>/wifi/request    "GET_CONFIG"               (ESP32 replies on /wifi/config)
-   <MAC>/wifi/set        JSON  {"ssid":"<s>","password":"<p>"}
-   <MAC>/reset_config    "RESET_CONFIG"             (ESP32 clears NVS and reboots to setup portal)
+   <MAC>/set_name        ENC1  encrypted "My Device Label"   (ESP32 saves to NVS)
+   <MAC>/wifi/request    ENC1  encrypted "GET_CONFIG"
+   <MAC>/wifi/set        ENC1  encrypted JSON  {"ssid":"<s>","password":"<p>"}
+   <MAC>/reset_config    ENC1  encrypted "RESET_CONFIG"
 
  ── Admin passkey (WiFi password reveal) ───────────────────────
    Passkey: 7096099673
 ================================================================
 """
 
-import os, json, struct, threading, time, zlib, datetime
+import os, json, struct, threading, time, zlib, datetime, base64, secrets
 from dataclasses import dataclass, field
 from typing import Optional, Any
 import tkinter as tk
@@ -37,7 +37,7 @@ import paho.mqtt.client as mqtt
 # ─────────────────────────────────────────────
 #  CONFIG
 # ─────────────────────────────────────────────
-APP_VERSION      = 1.2
+APP_VERSION      = 1.3
 MQTT_BROKER      = "broker.emqx.io"
 MQTT_PORT        = 1883
 CHUNK_SIZE       = 7168
@@ -50,6 +50,9 @@ CHECK_TIMEOUT_MS = 8000
 MAX_LOG_LINES    = 2000
 ADMIN_PASSKEY    = "7096099673"
 NAMES_FILE       = "device_names.json"   # local cache
+
+ENC_PREFIX       = "ENC1:"
+XTEA_KEY         = (0xA6E31F4B, 0xC904B27D, 0x51D8A3E9, 0x7B2F90C5)
 
 # ─────────────────────────────────────────────
 #  DESIGN TOKENS
@@ -100,6 +103,50 @@ LOG_COLORS = {
     "OTA"    : ACCENT,
     "SUCCESS": SUCCESS,
 }
+
+# ─────────────────────────────────────────────
+#  MQTT PAYLOAD ENCRYPTION
+# ─────────────────────────────────────────────
+def _xtea_encrypt_block(v0: int, v1: int) -> tuple[int, int]:
+    total = 0
+    delta = 0x9E3779B9
+    for _ in range(32):
+        v0 = (v0 + ((((v1 << 4) ^ (v1 >> 5)) + v1) ^
+                    (total + XTEA_KEY[total & 3]))) & 0xFFFFFFFF
+        total = (total + delta) & 0xFFFFFFFF
+        v1 = (v1 + ((((v0 << 4) ^ (v0 >> 5)) + v0) ^
+                    (total + XTEA_KEY[(total >> 11) & 3]))) & 0xFFFFFFFF
+    return v0, v1
+
+def _xtea_ctr_apply(data: bytes, nonce_hi: int, nonce_lo: int) -> bytes:
+    out = bytearray(data)
+    counter = 0
+    for offset in range(0, len(out), 8):
+        k0, k1 = _xtea_encrypt_block(nonce_hi ^ counter,
+                                     (nonce_lo + counter) & 0xFFFFFFFF)
+        stream = struct.pack(">II", k0, k1)
+        for i in range(min(8, len(out) - offset)):
+            out[offset + i] ^= stream[i]
+        counter = (counter + 1) & 0xFFFFFFFF
+    return bytes(out)
+
+def encrypt_payload(text: str) -> str:
+    plain = text.encode("utf-8")
+    nonce_hi = secrets.randbits(32)
+    nonce_lo = secrets.randbits(32)
+    cipher = _xtea_ctr_apply(plain, nonce_hi, nonce_lo)
+    raw = struct.pack(">II", nonce_hi, nonce_lo) + cipher
+    return ENC_PREFIX + base64.b64encode(raw).decode("ascii")
+
+def decrypt_payload(data: bytes) -> str:
+    text = data.decode(errors="replace")
+    if not text.startswith(ENC_PREFIX):
+        return text
+    raw = base64.b64decode(text[len(ENC_PREFIX):])
+    if len(raw) < 8:
+        raise ValueError("encrypted payload too short")
+    nonce_hi, nonce_lo = struct.unpack(">II", raw[:8])
+    return _xtea_ctr_apply(raw[8:], nonce_hi, nonce_lo).decode("utf-8")
 
 # ─────────────────────────────────────────────
 #  DEVICE NAME STORE  (MAC → friendly name)
@@ -255,7 +302,10 @@ def _on_disconnect(client, userdata, flags, rc, props):
 
 def _on_message(client, userdata, msg):
     topic   = msg.topic
-    payload = msg.payload.decode(errors="replace")
+    try:
+        payload = decrypt_payload(msg.payload)
+    except Exception:
+        payload = msg.payload.decode(errors="replace")
     parts   = topic.split("/")
     if not parts:
         return
@@ -380,7 +430,7 @@ def _auto_request_wifi(mac: str):
     if not session:
         return
     mqtt_client.subscribe(f"{mac}/wifi/config", qos=1)
-    mqtt_client.publish(f"{mac}/wifi/request", "GET_CONFIG", qos=COMMAND_QOS)
+    mqtt_client.publish(f"{mac}/wifi/request", encrypt_payload("GET_CONFIG"), qos=COMMAND_QOS)
     _add_log(mac, "WiFi config auto-requested on discovery", TEXT_DIM)
 
 
@@ -1555,7 +1605,7 @@ class DeviceInfoPanel:
                     "The device will save these to NVS and reconnect."):
                 return
             payload = json.dumps({"ssid": ssid, "password": pw})
-            mqtt_client.publish(f"{mac}/wifi/set", payload, qos=COMMAND_QOS)
+            mqtt_client.publish(f"{mac}/wifi/set", encrypt_payload(payload), qos=COMMAND_QOS)
             self._wifi_status.config(text="✓ Pushed to device", fg=SUCCESS)
             _add_log(mac, f"WiFi credentials pushed  ssid={ssid}", SUCCESS)
 
@@ -1886,7 +1936,7 @@ class SettingsPanel:
             messagebox.showerror("Not Connected", "MQTT not ready.")
             return
         mqtt_client.subscribe(f"{mac}/wifi/config", qos=1)
-        mqtt_client.publish(f"{mac}/wifi/request", "GET_CONFIG", qos=COMMAND_QOS)
+        mqtt_client.publish(f"{mac}/wifi/request", encrypt_payload("GET_CONFIG"), qos=COMMAND_QOS)
         self._settings_wifi_status.config(
             text="Requesting config from device…", fg=WARNING)
         _add_log(mac, "WiFi config requested (Settings)", TEXT_SEC)
@@ -1909,7 +1959,7 @@ class SettingsPanel:
                     f"Send credentials to {display_name(mac)}?\n\nSSID: {ssid}"):
                 return
             mqtt_client.publish(f"{mac}/wifi/set",
-                                json.dumps({"ssid": ssid, "password": pw}),
+                                encrypt_payload(json.dumps({"ssid": ssid, "password": pw})),
                                 qos=COMMAND_QOS)
             self._settings_wifi_status.config(text="✓ Pushed to device", fg=SUCCESS)
             _add_log(mac, f"WiFi credentials pushed  ssid={ssid}", SUCCESS)
@@ -1932,7 +1982,7 @@ class SettingsPanel:
                     "The ESP32 will reboot and start the setup hotspot. The user must enter the device name and WiFi password again."):
                 return
 
-            mqtt_client.publish(f"{mac}/reset_config", "RESET_CONFIG", qos=COMMAND_QOS)
+            mqtt_client.publish(f"{mac}/reset_config", encrypt_payload("RESET_CONFIG"), qos=COMMAND_QOS)
             set_name(mac, "")
 
             session = get_session(mac)

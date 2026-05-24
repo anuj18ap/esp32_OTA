@@ -396,7 +396,8 @@ void publishDeviceInfo()
     serializeJson(document, payload);
 
     // Publishes the payload as a retained message.
-    mqttClient.publish(topicInfo.c_str(), payload.c_str(), true);
+    String encrypted = encryptMqttPayload(payload);
+    mqttClient.publish(topicInfo.c_str(), encrypted.c_str(), true);
     publishLog("[MQTT] Listening on MAC: %s", deviceID.c_str());
 }
 
@@ -432,7 +433,8 @@ static void publishWiFiConfig()
     String payload;
     serializeJson(document, payload);
 
-    mqttClient.publish(topicWifiConfig.c_str(), payload.c_str(), false);
+    String encrypted = encryptMqttPayload(payload);
+    mqttClient.publish(topicWifiConfig.c_str(), encrypted.c_str(), false);
     mqttClient.loop();
     publishLog("[WiFi] Config sent for SSID: %s", currentWiFiSsid.c_str());
 }
@@ -446,12 +448,16 @@ return-type bool - true when the topic was handled
 ************************************************************/
 bool handleDeviceConfigMessage(const String& topic, byte* payload, unsigned int length)
 {
+    String plainPayload;
+    if (!decryptMqttPayload(payload, length, plainPayload))
+    {
+        publishLog("[MQTT] Encrypted payload decode failed for topic: %s", topic.c_str());
+        return true;
+    }
+
     if (topic == topicSetName)
     {
-        String newName;
-        newName.reserve(length);
-        for (unsigned int i = 0; i < length; i++)
-            newName += (char)payload[i];
+        String newName = plainPayload;
         newName.trim();
 
         Preferences preferences;
@@ -467,10 +473,7 @@ bool handleDeviceConfigMessage(const String& topic, byte* payload, unsigned int 
 
     if (topic == topicWifiRequest)
     {
-        String request;
-        request.reserve(length);
-        for (unsigned int i = 0; i < length; i++)
-            request += (char)payload[i];
+        String request = plainPayload;
         request.trim();
 
         if (request == "GET_CONFIG")
@@ -483,7 +486,7 @@ bool handleDeviceConfigMessage(const String& topic, byte* payload, unsigned int 
     if (topic == topicWifiSet)
     {
         JsonDocument document;
-        DeserializationError error = deserializeJson(document, payload, length);
+        DeserializationError error = deserializeJson(document, plainPayload);
         if (error)
         {
             publishLog("[WiFi] Set JSON error: %s", error.c_str());
@@ -515,10 +518,7 @@ bool handleDeviceConfigMessage(const String& topic, byte* payload, unsigned int 
 
     if (topic == topicResetConfig)
     {
-        String request;
-        request.reserve(length);
-        for (unsigned int i = 0; i < length; i++)
-            request += (char)payload[i];
+        String request = plainPayload;
         request.trim();
 
         if (request != "RESET_CONFIG")

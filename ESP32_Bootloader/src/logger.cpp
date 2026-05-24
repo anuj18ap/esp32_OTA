@@ -24,6 +24,7 @@ void publishLog(const char* format, ...)
 
     if (mqttClient.connected() && topicLog.length() > 0)
     {
-        mqttClient.publish(topicLog.c_str(), logBuffer, false);
+        String encrypted = encryptMqttPayload(String(logBuffer));
+        mqttClient.publish(topicLog.c_str(), encrypted.c_str(), false);
     }
 }

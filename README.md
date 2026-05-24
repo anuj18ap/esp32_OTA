@@ -1,8 +1,8 @@
 # ESP32 Home Automation MQTT OTA Firmware
 
 ![Platform](https://img.shields.io/badge/Platform-ESP32--WROOM--32E-blue.svg)
-![Application](https://img.shields.io/badge/Application-v0.3-green.svg)
-![Uploader](https://img.shields.io/badge/Uploader-v0.2-brightgreen.svg)
+![Application](https://img.shields.io/badge/Application-v0.4-green.svg)
+![Uploader](https://img.shields.io/badge/Uploader-v1.3-brightgreen.svg)
 ![Framework](https://img.shields.io/badge/Framework-Arduino-00979D.svg)
 ![Build](https://img.shields.io/badge/Build-PlatformIO-orange.svg)
 ![OTA](https://img.shields.io/badge/OTA-MQTT-lightgrey.svg)
@@ -24,6 +24,7 @@ The desktop uploader in `Firmware_PythonFiles` is a Tkinter GUI for discovering 
 | `v0.1` | Base automation firmware | Added the core ESP32 automation runtime: MQTT connectivity, 8-channel relay control, physical input handling, retained relay state, and basic automation command processing. |
 | `v0.2` | OTA and desktop uploader | Added the MQTT OTA pipeline: firmware metadata transfer, chunked binary upload, per-chunk acknowledgements, CRC32 verification, OTA status reporting, device logs, auto-discovery, and the Python Tkinter uploader workflow. |
 | `v0.3` | App identity and WiFi provisioning | Removed hard-coded station WiFi credentials and added NVS-backed setup: first-boot hotspot, captive portal DNS, local device-name and WiFi setup pages, nearby WiFi scanning, wrong-password retry feedback, app-visible device names, app WiFi management, admin-gated reset configuration, and periodic rediscovery publishing. |
+| `v0.4` | Encrypted MQTT management payloads | Added shared-key encryption for app/device management payloads so device info, logs, WiFi credentials, and configuration commands are no longer readable as plain text in generic MQTT clients. OTA firmware chunks remain binary and unchanged for transfer reliability. |
 
 ## Project Structure
 
@@ -44,14 +45,14 @@ The desktop uploader in `Firmware_PythonFiles` is a Tkinter GUI for discovering 
 - Controls 2 RGB LED strips using 0-100 percent `R,G,B` MQTT payloads.
 - Publishes each RGB strip state as retained `R,G,B` CSV text.
 - Uses the ESP32 MAC-derived ID as the MQTT topic prefix.
-- Publishes retained device information on `<deviceID>/info`.
-- Stores app-visible device name in NVS from `<deviceID>/set_name`.
-- Starts a setup hotspot and local HTML portal when no saved WiFi credentials exist.
+- Publishes retained device discovery information with firmware version and saved name.
+- Stores the app-visible device name and WiFi credentials in NVS.
+- Starts a setup hotspot and captive portal when no saved WiFi credentials exist.
 - Stores WiFi credentials in NVS and reports them to the app when requested.
-- Responds to OTA readiness checks on `<deviceID>/ota_check`.
-- Receives OTA metadata on `<deviceID>/ota/begin`.
-- Receives firmware chunks on `<deviceID>/ota/chunk`.
-- Publishes per-chunk ACKs on `<deviceID>/ota/ack`.
+- Encrypts management payloads and logs before publishing to MQTT.
+- Responds to OTA readiness checks.
+- Receives OTA metadata and firmware chunks over MQTT.
+- Publishes per-chunk acknowledgements.
 - Verifies CRC32 before finalising the flash update.
 - Publishes OTA status and ESP32 debug logs.
 
@@ -69,6 +70,8 @@ Automation topics are fixed `home/...` topics.
 | `home/rgb/2/set` | Broker to ESP32 | `R,G,B` | Sets RGB strip 2 brightness percentages |
 
 Device, WiFi, and OTA topics use the ESP32 MAC-derived device ID as the prefix.
+
+Device-management payloads use the `ENC1:` encrypted text envelope. The Python uploader decrypts these automatically. OTA transfer payloads stay in their original binary/control format for transfer reliability.
 
 | Topic | Direction | Purpose |
 | --- | --- | --- |

@@ -1,6 +1,6 @@
 #pragma once
 
-#define FW_VERSION "0.3" // Firmware version published to MQTT.
+#define FW_VERSION "0.4" // Firmware version published to MQTT.
 #define LED_PIN 2        // Onboard LED pin used for heartbeat blinking.
 
 #define MQTT_BUFFER_SIZE 8192   // Larger MQTT packet buffer for faster OTA chunks.
