@@ -11,19 +11,19 @@
 
 ## Overview
 
-This project combines ESP32 home automation control with MQTT OTA firmware updates. The firmware controls 8 relay channels with physical button toggles and MQTT commands, controls 2 RGB LED strips with 0-100 percent PWM values over MQTT, and still supports MQTT-based OTA updates.
+This project combines ESP32 home automation control, MQTT device management, and MQTT OTA firmware updates. The firmware controls 8 relay channels, handles physical inputs, controls 2 RGB LED strips, and can update itself from a PlatformIO-generated firmware binary.
 
-The ESP32 connects to Wi-Fi, connects to the configured MQTT broker, subscribes to automation and OTA topics, publishes retained relay/RGB status, receives a PlatformIO-generated `.bin` file in chunks during OTA, verifies CRC32, writes the image using the ESP32 `Update` API, and restarts after a successful update.
+On first boot, the ESP32 opens a setup hotspot and captive portal so the user can enter a device name and WiFi credentials. After provisioning, it connects to the MQTT broker, publishes discovery information, accepts automation commands, supports app-driven WiFi management, and performs chunked OTA updates with CRC32 verification.
 
-The desktop uploader in `Firmware_PythonFiles` provides a small Tkinter GUI that checks the ESP32 status, sends OTA metadata, streams firmware chunks, waits for an ACK after each chunk, and displays upload progress.
+The desktop uploader in `Firmware_PythonFiles` is a Tkinter GUI for discovering devices, viewing WiFi/device information, pushing WiFi changes, resetting configuration, and flashing firmware over MQTT.
 
 ## Version Control
 
 | Version | Scope | Changes |
 | --- | --- | --- |
-| `v0.1` | Base automation firmware | Added ESP32 MQTT connectivity, 8-channel relay output control, physical input/button handling, relay state publishing, and basic MQTT command handling for local automation. |
-| `v0.2` | OTA and desktop uploader | Added MQTT OTA update flow, firmware metadata transfer, chunked binary upload, per-chunk ACK handling, CRC32 verification, OTA status publishing, ESP32 log publishing, auto-discovery through `<deviceID>/info`, and the Python Tkinter uploader workflow. |
-| `v0.3` | App identity and WiFi provisioning | Removed hard-coded station WiFi credentials, added first-boot hotspot provisioning, captive-portal DNS, local HTML setup pages for device name and WiFi selection, nearby WiFi scanning, wrong-password retry feedback, NVS credential storage, Settings reset configuration command, `<deviceID>/set_name`, expanded `<deviceID>/info` with the saved `name`, periodic info republishing for app rediscovery, `<deviceID>/wifi/request`, `<deviceID>/wifi/config`, `<deviceID>/wifi/set`, and `<deviceID>/reset_config`. |
+| `v0.1` | Base automation firmware | Added the core ESP32 automation runtime: MQTT connectivity, 8-channel relay control, physical input handling, retained relay state, and basic automation command processing. |
+| `v0.2` | OTA and desktop uploader | Added the MQTT OTA pipeline: firmware metadata transfer, chunked binary upload, per-chunk acknowledgements, CRC32 verification, OTA status reporting, device logs, auto-discovery, and the Python Tkinter uploader workflow. |
+| `v0.3` | App identity and WiFi provisioning | Removed hard-coded station WiFi credentials and added NVS-backed setup: first-boot hotspot, captive portal DNS, local device-name and WiFi setup pages, nearby WiFi scanning, wrong-password retry feedback, app-visible device names, app WiFi management, admin-gated reset configuration, and periodic rediscovery publishing. |
 
 ## Project Structure
 
@@ -39,7 +39,7 @@ The desktop uploader in `Firmware_PythonFiles` provides a small Tkinter GUI that
 
 ## Firmware Features
 
-- Controls 8 relay outputs from MQTT or active-LOW physical buttons.
+- Controls 8 relay outputs from MQTT commands or active-LOW physical buttons.
 - Publishes relay state as a retained 1-byte bitmask.
 - Controls 2 RGB LED strips using 0-100 percent `R,G,B` MQTT payloads.
 - Publishes each RGB strip state as retained `R,G,B` CSV text.
@@ -53,8 +53,7 @@ The desktop uploader in `Firmware_PythonFiles` provides a small Tkinter GUI that
 - Receives firmware chunks on `<deviceID>/ota/chunk`.
 - Publishes per-chunk ACKs on `<deviceID>/ota/ack`.
 - Verifies CRC32 before finalising the flash update.
-- Publishes OTA status on `<deviceID>/ota_status`.
-- Publishes ESP32 debug logs on `<deviceID>/log`.
+- Publishes OTA status and ESP32 debug logs.
 
 ## MQTT Topics
 
@@ -117,7 +116,7 @@ RGB command examples:
 8. Uploader sends `END` to `<deviceID>/ota/end`.
 9. ESP32 verifies CRC32, publishes `SUCCESS`, and restarts.
 
-## App Discovery and WiFi Flow
+## App Discovery And WiFi Flow
 
 1. ESP32 boots, loads the saved device name and WiFi credentials from NVS, then connects to WiFi and MQTT.
 2. ESP32 publishes `<deviceID>/info` with `id`, `firmware`, and `name`.
@@ -149,7 +148,7 @@ Setup flow:
 
 After provisioning, normal boot uses the saved NVS credentials. If the saved credentials fail later, the ESP32 starts the setup hotspot again.
 
-The Python uploader Settings tab also includes **Reset Configuration**. Pressing it sends `<deviceID>/reset_config`, clears the app's cached WiFi/name fields for that device, and forces the ESP32 user to enter the device name and WiFi password again through the setup portal.
+The Python uploader Settings tab also includes **Reset Configuration**. Pressing it requires the admin passkey, sends `<deviceID>/reset_config`, clears the app's cached WiFi/name fields for that device, and forces the ESP32 user to enter the device name and WiFi password again through the setup portal.
 
 ## Build Firmware
 
