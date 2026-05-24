@@ -232,21 +232,21 @@ void connectMQTT()
             publishDeviceInfo();
             previousInfoMillis = millis();
             mqttClient.subscribe(topicSetName.c_str(), 1);
-            publishLog("[MQTT] Subscribed device name topic.");
+            //publishLog("[MQTT] Subscribed device name topic.");
             mqttClient.subscribe(topicWifiRequest.c_str(), 1);
-            publishLog("[MQTT] Subscribed WiFi request topic.");
+            //publishLog("[MQTT] Subscribed WiFi request topic.");
             mqttClient.subscribe(topicWifiSet.c_str(), 1);
-            publishLog("[MQTT] Subscribed WiFi set topic.");
+            //publishLog("[MQTT] Subscribed WiFi set topic.");
             // Subscribes to the OTA handshake, metadata, chunk, and end topics.
             mqttClient.subscribe(topicOTACheck.c_str(), 1);
-            publishLog("[MQTT] Subscribed OTA check topic.");
+            //publishLog("[MQTT] Subscribed OTA check topic.");
             mqttClient.subscribe(topicOTABegin.c_str(), 1);
-            publishLog("[MQTT] Subscribed OTA begin topic.");
+            //publishLog("[MQTT] Subscribed OTA begin topic.");
             // Uses QoS 0 for OTA chunks because the custom ACK/retry handles reliability faster.
             mqttClient.subscribe(topicOTAChunk.c_str(), 0);
-            publishLog("[MQTT] Subscribed OTA chunk topic with QoS 0.");
+            //publishLog("[MQTT] Subscribed OTA chunk topic with QoS 0.");
             mqttClient.subscribe(topicOTAEnd.c_str(), 1);
-            publishLog("[MQTT] Subscribed OTA end topic.");
+            //publishLog("[MQTT] Subscribed OTA end topic.");
             // Subscribes to home automation command topics after MQTT reconnects.
             subscribeHomeAutomationTopics();
             // Publishes retained relay and RGB states for MQTT dashboard sync.

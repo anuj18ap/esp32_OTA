@@ -1,8 +1,32 @@
 #include <ArduinoJson.h>
 #include <Update.h>
+#include <string.h>
 
 #include "FirmwareApp.h"
 #include "FirmwareState.h"
+
+static uint8_t otaPayloadBuffer[MQTT_MAX_PACKET_SIZE];
+
+/***********************************************************
+brief       Copies an incoming MQTT payload out of PubSubClient's
+            shared packet buffer before any MQTT publish/log happens.
+arguments   payload - Raw payload bytes from PubSubClient callback
+            length  - Number of payload bytes to copy
+return-type bool - true when the payload fits in the OTA copy buffer
+************************************************************/
+static bool copyOtaPayload(byte* payload, unsigned int length)
+{
+    if (length > sizeof(otaPayloadBuffer))
+    {
+        publishLog("[OTA] Payload too large: %u > %u",
+                   length, (unsigned int)sizeof(otaPayloadBuffer));
+        publishStatus("FAILED");
+        return false;
+    }
+
+    memcpy(otaPayloadBuffer, payload, length);
+    return true;
+}
 
 /***********************************************************
 brief       Publishes OTA status immediately and flushes the MQTT
@@ -230,17 +254,19 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
 
     if (currentTopic == topicOTABegin)
     {
-        // Starts OTA when metadata arrives from the uploader.
+        // Copy before logging because PubSubClient reuses its packet buffer.
+        if (!copyOtaPayload(payload, length)) return;
         publishLog("[MQTT] OTA BEGIN topic received (%u bytes)", length);
-        handleOtaBegin(payload, length);
+        handleOtaBegin(otaPayloadBuffer, length);
         return;
     }
 
     if (currentTopic == topicOTAChunk)
     {
-        // Writes each binary OTA chunk to the update partition.
+        // Copy before logging because the chunk payload is binary data.
+        if (!copyOtaPayload(payload, length)) return;
         publishLog("[MQTT] OTA CHUNK topic received (%u bytes)", length);
-        handleOtaChunk(payload, length);
+        handleOtaChunk(otaPayloadBuffer, length);
         return;
     }
 
