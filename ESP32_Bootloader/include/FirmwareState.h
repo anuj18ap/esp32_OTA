@@ -25,6 +25,7 @@ extern String topicSetName;     // MQTT topic for saving the app-visible device 
 extern String topicWifiRequest; // MQTT topic for requesting saved Wi-Fi credentials.
 extern String topicWifiConfig;  // MQTT topic for publishing saved Wi-Fi credentials.
 extern String topicWifiSet;     // MQTT topic for saving new Wi-Fi credentials.
+extern String topicResetConfig; // MQTT topic for clearing saved identity and Wi-Fi config.
 
 extern String deviceName;      // App-visible device name loaded from NVS.
 extern String currentWiFiSsid; // Wi-Fi SSID loaded from NVS or the firmware default.

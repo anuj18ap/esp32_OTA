@@ -60,4 +60,7 @@ void initTopics()
     topicWifiRequest = deviceID + "/wifi/request";
     topicWifiConfig = deviceID + "/wifi/config";
     topicWifiSet = deviceID + "/wifi/set";
+
+    // Topic for clearing saved device name and Wi-Fi credentials.
+    topicResetConfig = deviceID + "/reset_config";
 }

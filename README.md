@@ -23,7 +23,7 @@ The desktop uploader in `Firmware_PythonFiles` provides a small Tkinter GUI that
 | --- | --- | --- |
 | `v0.1` | Base automation firmware | Added ESP32 MQTT connectivity, 8-channel relay output control, physical input/button handling, relay state publishing, and basic MQTT command handling for local automation. |
 | `v0.2` | OTA and desktop uploader | Added MQTT OTA update flow, firmware metadata transfer, chunked binary upload, per-chunk ACK handling, CRC32 verification, OTA status publishing, ESP32 log publishing, auto-discovery through `<deviceID>/info`, and the Python Tkinter uploader workflow. |
-| `v0.3` | App identity and WiFi config | Added user device name support with NVS persistence, `<deviceID>/set_name`, expanded `<deviceID>/info` with the saved `name`, periodic info republishing for app rediscovery, WiFi credential storage in NVS, `<deviceID>/wifi/request`, `<deviceID>/wifi/config`, and `<deviceID>/wifi/set` with reboot after saving new credentials. |
+| `v0.3` | App identity and WiFi provisioning | Removed hard-coded station WiFi credentials, added first-boot hotspot provisioning, captive-portal DNS, local HTML setup pages for device name and WiFi selection, nearby WiFi scanning, wrong-password retry feedback, NVS credential storage, Settings reset configuration command, `<deviceID>/set_name`, expanded `<deviceID>/info` with the saved `name`, periodic info republishing for app rediscovery, `<deviceID>/wifi/request`, `<deviceID>/wifi/config`, `<deviceID>/wifi/set`, and `<deviceID>/reset_config`. |
 
 ## Project Structure
 
@@ -46,6 +46,7 @@ The desktop uploader in `Firmware_PythonFiles` provides a small Tkinter GUI that
 - Uses the ESP32 MAC-derived ID as the MQTT topic prefix.
 - Publishes retained device information on `<deviceID>/info`.
 - Stores app-visible device name in NVS from `<deviceID>/set_name`.
+- Starts a setup hotspot and local HTML portal when no saved WiFi credentials exist.
 - Stores WiFi credentials in NVS and reports them to the app when requested.
 - Responds to OTA readiness checks on `<deviceID>/ota_check`.
 - Receives OTA metadata on `<deviceID>/ota/begin`.
@@ -77,6 +78,7 @@ Device, WiFi, and OTA topics use the ESP32 MAC-derived device ID as the prefix.
 | `<deviceID>/wifi/request` | App to ESP32 | `GET_CONFIG` request for the saved WiFi credentials |
 | `<deviceID>/wifi/config` | ESP32 to app | JSON WiFi reply: `{"ssid":"<ssid>","password":"<password>"}` |
 | `<deviceID>/wifi/set` | App to ESP32 | JSON WiFi update: `{"ssid":"<ssid>","password":"<password>"}`; ESP32 saves and reboots |
+| `<deviceID>/reset_config` | App to ESP32 | `RESET_CONFIG`; ESP32 clears saved device name and WiFi credentials, then reboots to setup portal |
 | `<deviceID>/ota_check` | Uploader to ESP32 | Readiness check before upload |
 | `<deviceID>/ota_status` | ESP32 to uploader | `READY`, `UPDATING`, `SUCCESS`, or `FAILED` |
 | `<deviceID>/ota/begin` | Uploader to ESP32 | Firmware size, chunk count, and CRC32 |
@@ -123,6 +125,31 @@ RGB command examples:
 4. ESP32 replies immediately on `<deviceID>/wifi/config` with the saved `ssid` and `password`.
 5. If the app sends a new name to `<deviceID>/set_name`, ESP32 saves it in NVS and republishes `<deviceID>/info`.
 6. If the app sends new WiFi credentials to `<deviceID>/wifi/set`, ESP32 saves them in NVS, publishes a log confirmation, and reboots.
+7. If the app sends `RESET_CONFIG` to `<deviceID>/reset_config`, ESP32 clears saved device name and WiFi credentials, then reboots into first-boot setup.
+
+## First-Boot WiFi Setup
+
+If no WiFi SSID is saved in ESP32 NVS, the firmware does not use a hard-coded network. Instead it starts a setup hotspot with captive-portal DNS:
+
+```text
+SSID: ESP32-Setup-<last 6 MAC chars>
+Password: 12345678
+Setup page: http://192.168.4.1
+```
+
+Setup flow:
+
+1. Connect a phone or laptop to the ESP32 setup hotspot.
+2. The phone may automatically show a WiFi sign-in/setup page. If it does not, open `http://192.168.4.1`.
+3. Enter the device name.
+4. Select a nearby WiFi network from the scanned list.
+5. Enter the WiFi password.
+6. If the password is correct, ESP32 saves the device name, SSID, and password to NVS, then reboots.
+7. If the password is wrong or connection fails, the setup page shows an error and lets the user try again.
+
+After provisioning, normal boot uses the saved NVS credentials. If the saved credentials fail later, the ESP32 starts the setup hotspot again.
+
+The Python uploader Settings tab also includes **Reset Configuration**. Pressing it sends `<deviceID>/reset_config`, clears the app's cached WiFi/name fields for that device, and forces the ESP32 user to enter the device name and WiFi password again through the setup portal.
 
 ## Build Firmware
 
@@ -172,7 +199,8 @@ Firmware settings are in `ESP32_Bootloader/include/Config.h` and `ESP32_Bootload
 - `FW_VERSION` controls the firmware version published to MQTT.
 - `MQTT_BUFFER_SIZE` is set to `8192` for OTA chunk packets.
 - `INFO_PUBLISH_INTERVAL` controls how often `<deviceID>/info` is republished for app rediscovery.
-- `WIFI_SSID` and `WIFI_PASSWORD` are the first-boot defaults. After WiFi credentials are saved through MQTT, the ESP32 loads them from NVS.
+- `PROVISION_AP_PREFIX` and `PROVISION_AP_PASSWORD` configure the setup hotspot used when no saved WiFi credentials are present.
+- WiFi station SSID/password are not hard-coded. They are saved through the setup portal or MQTT and loaded from NVS.
 - `MQTT_BROKER` and `MQTT_PORT` configure the MQTT broker and were kept as already present in code.
 
 Home automation pin settings are in `ESP32_Bootloader/src/home_automation.cpp`.
@@ -201,6 +229,8 @@ ESP32 firmware:
 - ESP32 Arduino framework
 - `knolleary/PubSubClient`
 - `bblanchon/ArduinoJson`
+- ESP32 Arduino `WebServer`
+- ESP32 Arduino `DNSServer`
 
 Python uploader:
 

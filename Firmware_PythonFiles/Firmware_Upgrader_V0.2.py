@@ -20,6 +20,7 @@
    <MAC>/set_name        str   "My Device Label"   (ESP32 saves to NVS)
    <MAC>/wifi/request    "GET_CONFIG"               (ESP32 replies on /wifi/config)
    <MAC>/wifi/set        JSON  {"ssid":"<s>","password":"<p>"}
+   <MAC>/reset_config    "RESET_CONFIG"             (ESP32 clears NVS and reboots to setup portal)
 
  ── Admin passkey (WiFi password reveal) ───────────────────────
    Passkey: 7096099673
@@ -550,7 +551,7 @@ def _section_label(parent, text):
 # ─────────────────────────────────────────────
 #  ADMIN PASSKEY DIALOG
 # ─────────────────────────────────────────────
-def _ask_admin_passkey(on_success):
+def _ask_admin_passkey(on_success, message="Enter the admin passkey to reveal WiFi passwords."):
     """Show a modal dialog asking for the admin passkey.
     Calls on_success() if correct."""
     dlg = tk.Toplevel(root)
@@ -575,7 +576,7 @@ def _ask_admin_passkey(on_success):
              font=(FONT_UI, 11, "bold"),
              bg=CARD_BG, fg=TEXT_PRI).pack(anchor="w")
     tk.Label(body,
-             text="Enter the admin passkey to reveal WiFi passwords.",
+             text=message,
              font=(FONT_UI, 9),
              bg=CARD_BG, fg=TEXT_SEC).pack(anchor="w", pady=(4, 14))
 
@@ -1834,10 +1835,18 @@ class SettingsPanel:
         self._settings_pw_entry.pack(side=tk.LEFT, ipady=5, ipadx=6)
 
         # Apply WiFi Credentials button
-        _make_btn(body, "⬆  Apply WiFi Credentials",
+        action_row = tk.Frame(body, bg=PANEL_BG)
+        action_row.pack(anchor="w")
+
+        _make_btn(action_row, "⬆  Apply WiFi Credentials",
                   self._settings_push_wifi,
                   bg="#1a3a1a", fg=SUCCESS, padx=14, pady=8
-                  ).pack(anchor="w")
+                  ).pack(side=tk.LEFT)
+
+        _make_btn(action_row, "Reset Configuration",
+                  self._settings_reset_config,
+                  bg=DANGER_DIM, fg=DANGER, padx=14, pady=8
+                  ).pack(side=tk.LEFT, padx=(10, 0))
 
         self._settings_wifi_status = tk.Label(body, text="",
                                               font=(FONT_UI, 9),
@@ -1906,6 +1915,41 @@ class SettingsPanel:
             _add_log(mac, f"WiFi credentials pushed  ssid={ssid}", SUCCESS)
 
         _ask_wifi_password(_do_push)
+
+    def _settings_reset_config(self):
+        mac = self._wifi_mac_var.get()
+        if mac in ("— select —", ""):
+            messagebox.showerror("No Device", "Select a device first.")
+            return
+        if not mqtt_client:
+            messagebox.showerror("Not Connected", "MQTT not ready.")
+            return
+
+        def _do_reset():
+            if not messagebox.askyesno(
+                    "Reset Configuration",
+                    f"Reset saved device name and WiFi credentials on {display_name(mac)}?\n\n"
+                    "The ESP32 will reboot and start the setup hotspot. The user must enter the device name and WiFi password again."):
+                return
+
+            mqtt_client.publish(f"{mac}/reset_config", "RESET_CONFIG", qos=COMMAND_QOS)
+            set_name(mac, "")
+
+            session = get_session(mac)
+            if session:
+                session.wifi_ssid = ""
+                session.wifi_password = ""
+                session.wifi_received = False
+
+            self._settings_ssid_var.set("")
+            self._settings_pw_var.set("")
+            self._settings_wifi_status.config(
+                text="Reset command sent. Device will reboot to setup portal.", fg=WARNING)
+            _add_log(mac, "Reset configuration command sent", WARNING)
+
+        _ask_admin_passkey(
+            _do_reset,
+            "Enter the admin passkey to reset this device configuration.")
 
     def on_wifi_received(self, mac: str):
         if self._wifi_mac_var.get() == mac:

@@ -4,10 +4,10 @@
 #include "FirmwareApp.h"
 #include "FirmwareState.h"
 
-const char* WIFI_SSID     = "AceTech Solution";  // Wi-Fi network name used by the ESP32.
-const char* WIFI_PASSWORD = "AceTech@2023";      // Wi-Fi password used by the ESP32.
-const char* MQTT_BROKER   = "broker.emqx.io";    // Public MQTT broker used for OTA messages.
-const int   MQTT_PORT     = 1883;                // MQTT TCP port for the broker.
+const char* PROVISION_AP_PREFIX   = "ESP32-Setup-"; // Prefix for first-boot setup hotspot.
+const char* PROVISION_AP_PASSWORD = "12345678";     // Setup hotspot password, minimum 8 chars.
+const char* MQTT_BROKER           = "broker.emqx.io"; // Public MQTT broker used for OTA messages.
+const int   MQTT_PORT             = 1883;          // MQTT TCP port for the broker.
 
 WiFiClient   espClient;            // TCP client used by the MQTT client.
 PubSubClient mqttClient(espClient); // MQTT client used for OTA communication.
@@ -25,6 +25,7 @@ String topicSetName;     // MQTT topic for saving the app-visible device name.
 String topicWifiRequest; // MQTT topic for requesting saved Wi-Fi credentials.
 String topicWifiConfig;  // MQTT topic for publishing saved Wi-Fi credentials.
 String topicWifiSet;     // MQTT topic for saving new Wi-Fi credentials.
+String topicResetConfig; // MQTT topic for clearing saved identity and Wi-Fi config.
 String deviceName;       // App-visible device name loaded from NVS.
 String currentWiFiSsid;  // Wi-Fi SSID loaded from NVS or the firmware default.
 String currentWiFiPass;  // Wi-Fi password loaded from NVS or the firmware default.
