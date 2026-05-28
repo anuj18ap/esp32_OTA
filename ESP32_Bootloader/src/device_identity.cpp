@@ -30,7 +30,7 @@ return-type void
 void initTopics()
 {
     // Topic for retained device firmware information.
-    topicInfo = deviceID + "/info";
+    topicInfo = "AceTech/" + deviceID + "/info";
 
     // Topic for answering OTA readiness checks.
     topicOTACheck = deviceID + "/ota_check";
@@ -63,4 +63,8 @@ void initTopics()
 
     // Topic for clearing saved device name and Wi-Fi credentials.
     topicResetConfig = deviceID + "/reset_config";
+
+    relayTopic = deviceID + "/relay";
+    rgb1Topic  = deviceID + "/rgb/1";
+    rgb2Topic  = deviceID + "/rgb/2";
 }

@@ -1,17 +1,11 @@
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "FirmwareApp.h"
 #include "FirmwareState.h"
-
-// MQTT topics used by the relay and RGB automation feature.
-#define TOPIC_RELAY_STATUS  "home/relay/status"
-#define TOPIC_RELAY_SET     "home/relay/set"
-#define TOPIC_RGB1_STATUS   "home/rgb/1/status"
-#define TOPIC_RGB1_SET      "home/rgb/1/set"
-#define TOPIC_RGB2_STATUS   "home/rgb/2/status"
-#define TOPIC_RGB2_SET      "home/rgb/2/set"
 
 // Button inputs are active-LOW and use the ESP32 internal pull-up.
 const uint8_t BTN_PINS[8] = {13, 12, 14, 27, 26, 25, 33, 32};
@@ -33,7 +27,7 @@ const uint8_t RGB2_R = 25;
 const uint8_t RGB2_G = 33;
 const uint8_t RGB2_B = 32;
 
-// LEDC PWM configuration for 0-100 percent RGB values.
+// LEDC PWM configuration for 0-255 RGB values.
 const uint32_t PWM_FREQ       = 5000;
 const uint8_t  PWM_RESOLUTION = 8;
 
@@ -62,7 +56,7 @@ struct ChannelState
     uint32_t lastDebounceMs;
 };
 
-// Stores RGB channel levels as 0-100 percent values.
+// Stores RGB channel levels as 0-255 values.
 struct RGBState
 {
     uint8_t r;
@@ -75,6 +69,8 @@ RGBState     rgb[2];      // RGB strip states, where index 0 is RGB1 and index 1
 
 volatile uint8_t btnEventMask = 0;              // ISR-to-loop button event bitmask.
 portMUX_TYPE     buttonMux    = portMUX_INITIALIZER_UNLOCKED; // Protects button event updates.
+
+static void writeOutput(uint8_t ch, bool on);
 
 /***********************************************************
 brief       Attaches one RGB GPIO to LEDC PWM using the API
@@ -121,24 +117,6 @@ static void writePwmDuty(uint8_t pin, uint8_t channel, uint8_t duty)
 }
 
 /***********************************************************
-brief       Converts a 0-100 percent brightness value to an
-            8-bit LEDC PWM duty value.
-arguments   pct - Brightness percentage from 0 to 100
-return-type uint8_t - PWM duty from 0 to 255
-************************************************************/
-static uint8_t pct2duty(uint8_t pct)
-{
-    // Keeps zero brightness fully off.
-    if (pct == 0) return 0;
-
-    // Clamps full brightness to the maximum 8-bit PWM value.
-    if (pct >= 100) return 255;
-
-    // Scales middle percentage values into the 0-255 duty range.
-    return (uint8_t)((pct * 255UL) / 100);
-}
-
-/***********************************************************
 brief       Writes the stored RGB state for one strip to the
             matching LEDC PWM channels.
 arguments   idx - RGB strip index, 0 for RGB1 or 1 for RGB2
@@ -146,9 +124,9 @@ return-type void
 ************************************************************/
 static void applyRGB(uint8_t idx)
 {
-    uint8_t redDuty   = pct2duty(rgb[idx].r);
-    uint8_t greenDuty = pct2duty(rgb[idx].g);
-    uint8_t blueDuty  = pct2duty(rgb[idx].b);
+    uint8_t redDuty   = rgb[idx].r;
+    uint8_t greenDuty = rgb[idx].g;
+    uint8_t blueDuty  = rgb[idx].b;
 
     if (idx == 0)
     {
@@ -167,55 +145,135 @@ static void applyRGB(uint8_t idx)
 }
 
 /***********************************************************
-brief       Publishes one RGB strip state as a retained CSV
-            payload in R,G,B percent format.
-arguments   idx - RGB strip index, 0 for RGB1 or 1 for RGB2
-return-type void
+brief       Parses a JSON RGB payload expected by the Python V3 app:
+            {"r":N,"g":N,"b":N}, with each value clamped to 0-255.
+return-type bool - true when parsing succeeds
 ************************************************************/
-static void publishRGB(uint8_t idx)
+static bool parseRGBJson(byte* payload, unsigned int len,
+                         uint8_t* r, uint8_t* g, uint8_t* b)
 {
-    char buffer[16];
-    snprintf(buffer, sizeof(buffer), "%u,%u,%u", rgb[idx].r, rgb[idx].g, rgb[idx].b);
+    JsonDocument document;
+    DeserializationError error = deserializeJson(document, payload, len);
+    if (error) return false;
 
-    const char* topic = (idx == 0) ? TOPIC_RGB1_STATUS : TOPIC_RGB2_STATUS;
-    mqttClient.publish(topic, buffer, true);
-    publishLog("[MQTT] pub %s -> %s", topic, buffer);
+    *r = (uint8_t)constrain(document["r"] | 0, 0, 255);
+    *g = (uint8_t)constrain(document["g"] | 0, 0, 255);
+    *b = (uint8_t)constrain(document["b"] | 0, 0, 255);
+    return true;
 }
 
 /***********************************************************
-brief       Parses an MQTT RGB command payload in R,G,B format
-            and clamps each value to 0-100 percent.
-arguments   payload - MQTT payload bytes
-            len     - Number of payload bytes
-            r       - Output red percentage
-            g       - Output green percentage
-            b       - Output blue percentage
-return-type bool - true when parsing succeeds
+brief       Publishes the relay ACK expected by the Python V3 app.
 ************************************************************/
-static bool parseRGB(const char* payload, unsigned int len,
-                     uint8_t* r, uint8_t* g, uint8_t* b)
+static void publishRelayAck(uint8_t relayMask)
 {
-    char buffer[32];
+    char payload[5];
+    snprintf(payload, sizeof(payload), "0x%02X", relayMask);
 
-    // Rejects payloads that cannot fit in the local parsing buffer.
-    if (len >= sizeof(buffer)) return false;
+    String valueTopic = deviceID + "/relay/ack/" + String(payload);
+    mqttClient.publish(valueTopic.c_str(), payload, false);
 
-    // Copies the MQTT bytes into a null-terminated string for sscanf.
+    String legacyTopic = deviceID + "/relay/ack";
+    mqttClient.publish(legacyTopic.c_str(), payload, false);
+
+    mqttClient.loop();
+    publishLog("[MQTT] relay ACK -> %s", valueTopic.c_str());
+}
+
+/***********************************************************
+brief       Publishes the RGB ACK expected by the Python V3 app.
+************************************************************/
+static void publishRgbAck()
+{
+    String topic = deviceID + "/rgb/ack";
+    mqttClient.publish(topic.c_str(), "ok", false);
+    mqttClient.loop();
+    publishLog("[MQTT] RGB ACK -> ok");
+}
+
+/***********************************************************
+brief       Parses Python V3 relay command payloads such as "0x01".
+return-type bool - true when a byte mask was parsed
+************************************************************/
+static bool parseRelayMask(byte* payload, unsigned int len, uint8_t* mask)
+{
+    if (len == 1)
+    {
+        char c = (char)payload[0];
+        if (c >= '0' && c <= '9')
+            *mask = (uint8_t)(c - '0');
+        else if (c >= 'a' && c <= 'f')
+            *mask = (uint8_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F')
+            *mask = (uint8_t)(c - 'A' + 10);
+        else
+            *mask = payload[0];
+        return true;
+    }
+
+    if (len == 4 &&
+        payload[0] == 0x00 &&
+        payload[1] == 0x00 &&
+        payload[2] == 0x00)
+    {
+        *mask = payload[3];
+        return true;
+    }
+
+    char buffer[12];
+    if (len == 0 || len >= sizeof(buffer)) return false;
+
     memcpy(buffer, payload, len);
     buffer[len] = '\0';
 
-    int red;
-    int green;
-    int blue;
+    char* start = buffer;
+    while (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n')
+        start++;
 
-    // Requires exactly three comma-separated integer values.
-    if (sscanf(buffer, "%d,%d,%d", &red, &green, &blue) != 3) return false;
+    char* end = start + strlen(start);
+    while (end > start && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n'))
+        *--end = '\0';
 
-    // Clamps all RGB percentages to the supported 0-100 range.
-    *r = (uint8_t)constrain(red, 0, 100);
-    *g = (uint8_t)constrain(green, 0, 100);
-    *b = (uint8_t)constrain(blue, 0, 100);
+    if ((start[0] == '0') && (start[1] == 'x' || start[1] == 'X'))
+        start += 2;
+
+    if (*start == '\0') return false;
+
+    uint16_t value = 0;
+    while (*start)
+    {
+        char c = *start++;
+        uint8_t nibble;
+        if (c >= '0' && c <= '9')
+            nibble = c - '0';
+        else if (c >= 'a' && c <= 'f')
+            nibble = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F')
+            nibble = c - 'A' + 10;
+        else
+            return false;
+
+        value = (uint16_t)((value << 4) | nibble);
+        if (value > 0xFF) return false;
+    }
+
+    *mask = (uint8_t)value;
     return true;
+}
+
+/***********************************************************
+brief       Applies one relay state bitmask to all relay outputs.
+            Bit 0 maps to relay 1 and bit 7 maps to relay 8.
+************************************************************/
+static void applyRelayMask(uint8_t mask)
+{
+    for (uint8_t i = 0; i < 8; i++)
+    {
+        bool on = (mask & (1 << i)) != 0;
+        channels[i].on = on;
+        writeOutput(i, on);
+        publishLog("[RELAY] ch%u -> %s", i + 1, on ? "ON" : "OFF");
+    }
 }
 
 /***********************************************************
@@ -238,59 +296,8 @@ static void writeOutput(uint8_t ch, bool on)
 }
 
 /***********************************************************
-brief       Builds a one-byte relay bitmask from the current
-            ON/OFF state of all eight relay channels.
-arguments   None
-return-type uint8_t - Relay bitmask, bit0 for relay 1 through bit7 for relay 8
-************************************************************/
-static uint8_t buildRelayByte()
-{
-    uint8_t mask = 0;
-    for (uint8_t i = 0; i < 8; i++)
-    {
-        // Sets one bit for every relay channel that is currently ON.
-        if (channels[i].on) mask |= (1 << i);
-    }
-    return mask;
-}
-
-/***********************************************************
-brief       Publishes all relay states as one retained raw byte
-            where bit0 maps to relay 1 and bit7 maps to relay 8.
-arguments   None
-return-type void
-************************************************************/
-static void publishRelayStatus()
-{
-    uint8_t mask = buildRelayByte();
-    mqttClient.publish(TOPIC_RELAY_STATUS, &mask, 1, true);
-    publishLog("[MQTT] pub relay/status -> 0x%02X", mask);
-}
-
-/***********************************************************
-brief       Applies an MQTT relay bitmask to all relay outputs
-            and publishes the retained relay status.
-arguments   mask - Relay bitmask, bit0 for relay 1 through bit7 for relay 8
-return-type void
-************************************************************/
-static void applyRelayByte(uint8_t mask)
-{
-    for (uint8_t i = 0; i < 8; i++)
-    {
-        // Extracts this channel state from the matching bit position.
-        bool on = (mask >> i) & 0x01;
-
-        // Stores and applies the new relay state.
-        channels[i].on = on;
-        writeOutput(i, on);
-        publishLog("[RELAY] ch%u -> %s", i + 1, on ? "ON" : "OFF");
-    }
-    publishRelayStatus();
-}
-
-/***********************************************************
 brief       Toggles one relay channel from a debounced button
-            event and publishes the updated relay bitmask.
+            event or MQTT request.
 arguments   ch - Relay channel index from 0 to 7
 return-type void
 ************************************************************/
@@ -300,7 +307,6 @@ static void toggleChannel(uint8_t ch)
     writeOutput(ch, channels[ch].on);
     publishLog("[BTN] ch%u toggled -> %s", ch + 1,
                channels[ch].on ? "ON" : "OFF");
-    publishRelayStatus();
 }
 
 // Creates a small ISR for each button that only records a pending event bit.
@@ -381,12 +387,12 @@ return-type void
 ************************************************************/
 void subscribeHomeAutomationTopics()
 {
-    mqttClient.subscribe(TOPIC_RELAY_SET, 1);
-    publishLog("[MQTT] Subscribed relay set topic.");
-    mqttClient.subscribe(TOPIC_RGB1_SET, 1);
-    publishLog("[MQTT] Subscribed RGB1 set topic.");
-    mqttClient.subscribe(TOPIC_RGB2_SET, 1);
-    publishLog("[MQTT] Subscribed RGB2 set topic.");
+    mqttClient.subscribe(relayTopic.c_str(), 1);
+    String relayValueTopic = relayTopic + "/+";
+    mqttClient.subscribe(relayValueTopic.c_str(), 1);
+    mqttClient.subscribe(rgb1Topic.c_str(), 1);
+    mqttClient.subscribe(rgb2Topic.c_str(), 1);
+    publishLog("[MQTT] Subscribed relay/RGB request topics.");
 }
 
 /***********************************************************
@@ -397,10 +403,7 @@ return-type void
 ************************************************************/
 void publishHomeAutomationState()
 {
-    publishLog("[HOME] Publishing retained automation state.");
-    publishRelayStatus();
-    publishRGB(0);
-    publishRGB(1);
+    publishLog("[HOME] Relay/RGB state ready; request topics use ACK responses.");
 }
 
 /***********************************************************
@@ -413,42 +416,78 @@ return-type bool - true when the topic was handled
 ************************************************************/
 bool handleHomeAutomationMessage(const String& topic, byte* payload, unsigned int length)
 {
-    publishLog("[MQTT] Automation topic received: %s (%u bytes)",
-               topic.c_str(), length);
-
-    // Handles relay bitmask commands from MQTT.
-    if (topic == TOPIC_RELAY_SET)
+    String appRelayTopic = deviceID + "/relay";
+    String appRelayTopicPrefix = appRelayTopic + "/";
+    if (topic == appRelayTopic || topic.startsWith(appRelayTopicPrefix))
     {
-        if (length >= 1)
+        uint8_t mask;
+        bool parsed = false;
+        byte payloadCopy[12];
+        unsigned int parseLength = length;
+
+        if (topic.startsWith(appRelayTopicPrefix))
         {
-            uint8_t mask = payload[0];
-            publishLog("[MQTT] relay set -> 0x%02X", mask);
-            applyRelayByte(mask);
+            String value = topic.substring(appRelayTopicPrefix.length());
+            if (value == "ack" || value.startsWith("ack/"))
+            {
+                return true;
+            }
+            else
+            {
+                parsed = parseRelayMask((byte*)value.c_str(), value.length(), &mask);
+            }
         }
+
+        if (!parsed)
+        {
+            if (length <= sizeof(payloadCopy))
+            {
+                memcpy(payloadCopy, payload, length);
+                parsed = parseRelayMask(payloadCopy, parseLength, &mask);
+            }
+        }
+
+        if (!parsed)
+        {
+            publishLog("[RELAY] bad app payload bytes: %02X %02X %02X %02X len=%u",
+                       length > 0 ? payload[0] : 0,
+                       length > 1 ? payload[1] : 0,
+                       length > 2 ? payload[2] : 0,
+                       length > 3 ? payload[3] : 0,
+                       length);
+            return true;
+        }
+
+        publishLog("[MQTT] relay set topic=%s mask=0x%02X",
+                   topic.c_str(), mask);
+        applyRelayMask(mask);
+        publishRelayAck(mask);
         return true;
     }
 
-    // Handles RGB CSV commands for either RGB strip.
-    if (topic == TOPIC_RGB1_SET || topic == TOPIC_RGB2_SET)
+    publishLog("[MQTT] Automation topic received: %s (%u bytes)",
+               topic.c_str(), length);
+
+    String appRgb1Topic = deviceID + "/rgb/1";
+    String appRgb2Topic = deviceID + "/rgb/2";
+    if (topic == appRgb1Topic || topic == appRgb2Topic)
     {
-        // Chooses RGB strip 1 or 2 based on the command topic.
-        uint8_t idx = (topic == TOPIC_RGB1_SET) ? 0 : 1;
+        uint8_t idx = (topic == appRgb1Topic) ? 0 : 1;
         uint8_t red;
         uint8_t green;
         uint8_t blue;
 
-        // Parses, applies, and republishes valid RGB commands.
-        if (parseRGB((const char*)payload, length, &red, &green, &blue))
+        if (parseRGBJson(payload, length, &red, &green, &blue))
         {
             rgb[idx] = {red, green, blue};
             applyRGB(idx);
-            publishRGB(idx);
-            publishLog("[RGB%u] set -> R=%u G=%u B=%u",
+            publishRgbAck();
+            publishLog("[RGB%u] app set -> R=%u G=%u B=%u",
                        idx + 1, red, green, blue);
         }
         else
         {
-            publishLog("[RGB] bad payload - expected R,G,B (0-100)");
+            publishLog("[RGB] bad app payload - expected JSON r/g/b.");
         }
         return true;
     }

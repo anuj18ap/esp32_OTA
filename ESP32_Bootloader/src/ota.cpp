@@ -278,14 +278,19 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
         return;
     }
 
-    // Handles app-visible device name and Wi-Fi configuration topics.
-    if (handleDeviceConfigMessage(currentTopic, payload, length))
+    // Gives non-OTA topics to the relay and RGB automation handler.
+    String relayValuePrefix = relayTopic + "/";
+    if (currentTopic == relayTopic ||
+        currentTopic.startsWith(relayValuePrefix) ||
+        currentTopic == rgb1Topic ||
+        currentTopic == rgb2Topic)
     {
+        handleHomeAutomationMessage(currentTopic, payload, length);
         return;
     }
 
-    // Gives non-OTA topics to the relay and RGB automation handler.
-    if (handleHomeAutomationMessage(currentTopic, payload, length))
+    // Handles app-visible device name and Wi-Fi configuration topics.
+    if (handleDeviceConfigMessage(currentTopic, payload, length))
     {
         return;
     }

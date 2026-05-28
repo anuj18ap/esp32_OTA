@@ -30,6 +30,7 @@ extern String topicResetConfig; // MQTT topic for clearing saved identity and Wi
 extern String deviceName;      // App-visible device name loaded from NVS.
 extern String currentWiFiSsid; // Wi-Fi SSID loaded from NVS or the firmware default.
 extern String currentWiFiPass; // Wi-Fi password loaded from NVS or the firmware default.
+extern String rgb2Topic, rgb1Topic, relayTopic;
 
 extern unsigned long previousLedMillis; // Last LED toggle timestamp.
 extern bool          ledState;          // Current heartbeat LED state.

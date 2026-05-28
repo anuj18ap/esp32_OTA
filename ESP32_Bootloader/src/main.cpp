@@ -29,6 +29,7 @@ String topicResetConfig; // MQTT topic for clearing saved identity and Wi-Fi con
 String deviceName;       // App-visible device name loaded from NVS.
 String currentWiFiSsid;  // Wi-Fi SSID loaded from NVS or the firmware default.
 String currentWiFiPass;  // Wi-Fi password loaded from NVS or the firmware default.
+String rgb2Topic, rgb1Topic, relayTopic;
 
 unsigned long        previousLedMillis = 0;          // Last LED toggle timestamp.
 bool                 ledState          = false;      // Current LED output state.
