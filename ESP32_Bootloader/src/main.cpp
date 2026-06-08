@@ -53,6 +53,13 @@ void setup()
     Serial.begin(115200);
     delay(300);
 
+    pinMode(LED_PIN, OUTPUT);
+    pinMode(WIFI_STATUS_LED_PIN, OUTPUT);
+    pinMode(MQTT_STATUS_LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, LOW);
+    digitalWrite(WIFI_STATUS_LED_PIN, LOW);
+    digitalWrite(MQTT_STATUS_LED_PIN, LOW);
+
     publishLog("=================================");
     publishLog("ESP32 Home Automation + OTA v%s", FW_VERSION);
     publishLog("=================================");
@@ -105,13 +112,18 @@ void loop()
     // Reconnects Wi-Fi if the station disconnects from the router.
     if (WiFi.status() != WL_CONNECTED)
     {
+        digitalWrite(WIFI_STATUS_LED_PIN, LOW);
+        digitalWrite(MQTT_STATUS_LED_PIN, LOW);
         publishLog("[WiFi] Lost - reconnecting...");
         connectWiFi();
     }
 
     // Restores MQTT and subscriptions when the broker connection drops.
     if (!mqttClient.connected())
+    {
+        digitalWrite(MQTT_STATUS_LED_PIN, LOW);
         connectMQTT();
+    }
 
     // Processes incoming MQTT packets and keep-alive traffic.
     mqttClient.loop();

@@ -279,11 +279,11 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
     }
 
     // Gives non-OTA topics to the relay and RGB automation handler.
-    String relayValuePrefix = relayTopic + "/";
     if (currentTopic == relayTopic ||
-        currentTopic.startsWith(relayValuePrefix) ||
         currentTopic == rgb1Topic ||
-        currentTopic == rgb2Topic)
+        currentTopic == rgb2Topic ||
+        currentTopic.endsWith("/rgb/1") ||
+        currentTopic.endsWith("/rgb/2"))
     {
         handleHomeAutomationMessage(currentTopic, payload, length);
         return;

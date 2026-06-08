@@ -11,10 +11,10 @@
 const uint8_t BTN_PINS[8] = {13, 12, 14, 27, 26, 25, 33, 32};
 
 // Relay outputs drive the IN pins on the relay board.
-const uint8_t OUT_PINS[8] = {23, 22, 21, 19, 18, 5, 4, 2};
+const uint8_t OUT_PINS[8] = {23, 22, 21, 19, 18, 5, 4, 15};
 
 // Indicator LEDs mirror the relay ON/OFF state.
-const uint8_t RELAY_LED_PINS[8] = {15, 16, 17, 3, 1, 10, 9, 0};
+const uint8_t RELAY_LED_PINS[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 // Most relay boards are active-LOW, so LOW turns the relay ON.
 const bool RELAY_ACTIVE_HIGH = false;
@@ -27,27 +27,16 @@ const uint8_t RGB2_R = 25;
 const uint8_t RGB2_G = 33;
 const uint8_t RGB2_B = 32;
 
-// LEDC PWM configuration for 0-255 RGB values.
-const uint32_t PWM_FREQ       = 5000;
-const uint8_t  PWM_RESOLUTION = 8;
-
-// LEDC channel assignments for both RGB strips.
-#define LEDC_RGB1_R  0
-#define LEDC_RGB1_G  1
-#define LEDC_RGB1_B  2
-#define LEDC_RGB2_R  3
-#define LEDC_RGB2_G  4
-#define LEDC_RGB2_B  5
+// RGB PWM values are Arduino-style 0-255 values for common-ground RGB LEDs.
+const uint8_t RGB_OFF_DUTY = 0;
+const uint32_t RGB_PWM_FREQ = 1000;
+const uint8_t RGB_PWM_BITS = 8;
 
 // Button debounce time in milliseconds.
 #define DEBOUNCE_MS 50
 
-// Selects the LEDC API used by the installed ESP32 Arduino core.
-#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-#define USE_LEDC_PIN_API 1
-#else
-#define USE_LEDC_PIN_API 0
-#endif
+// Button pins overlap the RGB PWM pins in this wiring, so keep buttons disabled.
+const bool ENABLE_BUTTON_INPUTS = false;
 
 // Stores relay state and last debounce time for one channel.
 struct ChannelState
@@ -71,54 +60,13 @@ volatile uint8_t btnEventMask = 0;              // ISR-to-loop button event bitm
 portMUX_TYPE     buttonMux    = portMUX_INITIALIZER_UNLOCKED; // Protects button event updates.
 
 static void writeOutput(uint8_t ch, bool on);
+static void writeRgbPins(uint8_t rPin, uint8_t gPin, uint8_t bPin,
+                         uint8_t redDuty, uint8_t greenDuty, uint8_t blueDuty);
+static void writeRgbPin(uint8_t pin, uint8_t duty);
 
 /***********************************************************
-brief       Attaches one RGB GPIO to LEDC PWM using the API
-            available in the installed ESP32 Arduino core.
-arguments   pin        - GPIO pin used for PWM output
-            channel    - LEDC channel for Arduino core 2.x
-            frequency  - PWM frequency in hertz
-            resolution - PWM duty resolution in bits
-return-type void
-************************************************************/
-static void setupPwmPin(uint8_t pin, uint8_t channel,
-                        uint32_t frequency, uint8_t resolution)
-{
-#if USE_LEDC_PIN_API
-    // Arduino-ESP32 3.x attaches PWM directly by GPIO pin.
-    (void)channel;
-    ledcAttach(pin, frequency, resolution);
-#else
-    // Arduino-ESP32 2.x requires a channel setup before attaching the pin.
-    ledcSetup(channel, frequency, resolution);
-    ledcAttachPin(pin, channel);
-#endif
-}
-
-/***********************************************************
-brief       Writes an RGB PWM duty value using the LEDC API
-            available in the installed ESP32 Arduino core.
-arguments   pin     - GPIO pin used for Arduino core 3.x PWM writes
-            channel - LEDC channel used for Arduino core 2.x PWM writes
-            duty    - PWM duty value
-return-type void
-************************************************************/
-static void writePwmDuty(uint8_t pin, uint8_t channel, uint8_t duty)
-{
-#if USE_LEDC_PIN_API
-    // Arduino-ESP32 3.x writes PWM duty by GPIO pin.
-    (void)channel;
-    ledcWrite(pin, duty);
-#else
-    // Arduino-ESP32 2.x writes PWM duty by LEDC channel.
-    (void)pin;
-    ledcWrite(channel, duty);
-#endif
-}
-
-/***********************************************************
-brief       Writes the stored RGB state for one strip to the
-            matching LEDC PWM channels.
+brief       Writes one RGB color output using Arduino-style
+            PWM, matching analogWrite() prototype examples.
 arguments   idx - RGB strip index, 0 for RGB1 or 1 for RGB2
 return-type void
 ************************************************************/
@@ -130,18 +78,78 @@ static void applyRGB(uint8_t idx)
 
     if (idx == 0)
     {
-        // Applies RGB strip 1 duty values to its three PWM outputs.
-        writePwmDuty(RGB1_R, LEDC_RGB1_R, redDuty);
-        writePwmDuty(RGB1_G, LEDC_RGB1_G, greenDuty);
-        writePwmDuty(RGB1_B, LEDC_RGB1_B, blueDuty);
+        writeRgbPins(RGB1_R, RGB1_G, RGB1_B, redDuty, greenDuty, blueDuty);
     }
     else
     {
-        // Applies RGB strip 2 duty values to its three PWM outputs.
-        writePwmDuty(RGB2_R, LEDC_RGB2_R, redDuty);
-        writePwmDuty(RGB2_G, LEDC_RGB2_G, greenDuty);
-        writePwmDuty(RGB2_B, LEDC_RGB2_B, blueDuty);
+        writeRgbPins(RGB2_R, RGB2_G, RGB2_B, redDuty, greenDuty, blueDuty);
     }
+}
+
+/***********************************************************
+brief       Writes common-ground RGB duty values. For this LED type,
+            0 is OFF and 255 is fully ON, just like analogWrite().
+return-type void
+************************************************************/
+static void writeRgbPins(uint8_t rPin, uint8_t gPin, uint8_t bPin,
+                         uint8_t redDuty, uint8_t greenDuty, uint8_t blueDuty)
+{
+    writeRgbPin(rPin, redDuty);
+    writeRgbPin(gPin, greenDuty);
+    writeRgbPin(bPin, blueDuty);
+}
+
+/***********************************************************
+brief       Drives one common-ground RGB leg. Exact 0 and 255
+            use digital output so full OFF/ON works even if PWM
+            setup is the part failing on the prototype board.
+return-type void
+************************************************************/
+static void writeRgbPin(uint8_t pin, uint8_t duty)
+{
+    if (duty == 0)
+    {
+        digitalWrite(pin, LOW);
+        return;
+    }
+
+    if (duty == 255)
+    {
+        digitalWrite(pin, HIGH);
+        return;
+    }
+
+    analogWrite(pin, duty);
+}
+
+/***********************************************************
+brief       Runs a short visible RGB test at boot so wiring/PWM can
+            be verified before MQTT or the web app are involved.
+return-type void
+************************************************************/
+static void runRgbBootTest()
+{
+    const uint8_t pins[2][3] = {
+        {RGB1_R, RGB1_G, RGB1_B},
+        {RGB2_R, RGB2_G, RGB2_B}
+    };
+
+    Serial.println("[RGB] Boot test starting. Common pin must be GND.");
+    for (uint8_t led = 0; led < 2; led++)
+    {
+        Serial.printf("[RGB%u] RED pin=%u ON\n", led + 1, pins[led][0]);
+        writeRgbPins(pins[led][0], pins[led][1], pins[led][2], 255, 0, 0);
+        delay(700);
+        Serial.printf("[RGB%u] GREEN pin=%u ON\n", led + 1, pins[led][1]);
+        writeRgbPins(pins[led][0], pins[led][1], pins[led][2], 0, 255, 0);
+        delay(700);
+        Serial.printf("[RGB%u] BLUE pin=%u ON\n", led + 1, pins[led][2]);
+        writeRgbPins(pins[led][0], pins[led][1], pins[led][2], 0, 0, 255);
+        delay(700);
+        writeRgbPins(pins[led][0], pins[led][1], pins[led][2], 0, 0, 0);
+        delay(250);
+    }
+    Serial.println("[RGB] Boot test done.");
 }
 
 /***********************************************************
@@ -170,14 +178,11 @@ static void publishRelayAck(uint8_t relayMask)
     char payload[5];
     snprintf(payload, sizeof(payload), "0x%02X", relayMask);
 
-    String valueTopic = deviceID + "/relay/ack/" + String(payload);
-    mqttClient.publish(valueTopic.c_str(), payload, false);
-
-    String legacyTopic = deviceID + "/relay/ack";
-    mqttClient.publish(legacyTopic.c_str(), payload, false);
+    String topic = relayTopic + "/ack";
+    mqttClient.publish(topic.c_str(), payload, false);
 
     mqttClient.loop();
-    publishLog("[MQTT] relay ACK -> %s", valueTopic.c_str());
+    publishLog("[MQTT] relay ACK -> %s payload=%s", topic.c_str(), payload);
 }
 
 /***********************************************************
@@ -292,7 +297,8 @@ static void writeOutput(uint8_t ch, bool on)
     digitalWrite(OUT_PINS[ch], relayLevel ? HIGH : LOW);
 
     // Drives the indicator LED active-HIGH regardless of relay polarity.
-    digitalWrite(RELAY_LED_PINS[ch], on ? HIGH : LOW);
+    if (RELAY_LED_PINS[ch] != 0xFF)
+        digitalWrite(RELAY_LED_PINS[ch], on ? HIGH : LOW);
 }
 
 /***********************************************************
@@ -348,31 +354,36 @@ void initializeHomeAutomation()
     {
         channels[i] = {false, 0};
         pinMode(OUT_PINS[i], OUTPUT);
-        pinMode(RELAY_LED_PINS[i], OUTPUT);
+        if (RELAY_LED_PINS[i] != 0xFF)
+            pinMode(RELAY_LED_PINS[i], OUTPUT);
         writeOutput(i, false);
     }
 
-    // Enables internal pull-ups and attaches falling-edge button interrupts.
-    for (uint8_t i = 0; i < 8; i++)
+    if (ENABLE_BUTTON_INPUTS)
     {
-        pinMode(BTN_PINS[i], INPUT_PULLUP);
-        attachInterrupt(digitalPinToInterrupt(BTN_PINS[i]), ISR_TABLE[i], FALLING);
+        // Enables internal pull-ups and attaches falling-edge button interrupts.
+        for (uint8_t i = 0; i < 8; i++)
+        {
+            pinMode(BTN_PINS[i], INPUT_PULLUP);
+            attachInterrupt(digitalPinToInterrupt(BTN_PINS[i]), ISR_TABLE[i], FALLING);
+        }
     }
 
-    // Configures PWM outputs for RGB strip 1.
-    setupPwmPin(RGB1_R, LEDC_RGB1_R, PWM_FREQ, PWM_RESOLUTION);
-    setupPwmPin(RGB1_G, LEDC_RGB1_G, PWM_FREQ, PWM_RESOLUTION);
-    setupPwmPin(RGB1_B, LEDC_RGB1_B, PWM_FREQ, PWM_RESOLUTION);
-
-    // Configures PWM outputs for RGB strip 2.
-    setupPwmPin(RGB2_R, LEDC_RGB2_R, PWM_FREQ, PWM_RESOLUTION);
-    setupPwmPin(RGB2_G, LEDC_RGB2_G, PWM_FREQ, PWM_RESOLUTION);
-    setupPwmPin(RGB2_B, LEDC_RGB2_B, PWM_FREQ, PWM_RESOLUTION);
+    // Configures RGB pins as normal PWM outputs, like the prototype analogWrite example.
+    pinMode(RGB1_R, OUTPUT);
+    pinMode(RGB1_G, OUTPUT);
+    pinMode(RGB1_B, OUTPUT);
+    pinMode(RGB2_R, OUTPUT);
+    pinMode(RGB2_G, OUTPUT);
+    pinMode(RGB2_B, OUTPUT);
+    analogWriteResolution(RGB_PWM_BITS);
+    analogWriteFrequency(RGB_PWM_FREQ);
+    runRgbBootTest();
 
     // Starts both RGB strips fully off.
     for (uint8_t i = 0; i < 2; i++)
     {
-        rgb[i] = {0, 0, 0};
+        rgb[i] = {RGB_OFF_DUTY, RGB_OFF_DUTY, RGB_OFF_DUTY};
         applyRGB(i);
     }
 
@@ -388,10 +399,10 @@ return-type void
 void subscribeHomeAutomationTopics()
 {
     mqttClient.subscribe(relayTopic.c_str(), 1);
-    String relayValueTopic = relayTopic + "/+";
-    mqttClient.subscribe(relayValueTopic.c_str(), 1);
     mqttClient.subscribe(rgb1Topic.c_str(), 1);
     mqttClient.subscribe(rgb2Topic.c_str(), 1);
+    mqttClient.subscribe("+/rgb/1", 1);
+    mqttClient.subscribe("+/rgb/2", 1);
     publishLog("[MQTT] Subscribed relay/RGB request topics.");
 }
 
@@ -416,35 +427,36 @@ return-type bool - true when the topic was handled
 ************************************************************/
 bool handleHomeAutomationMessage(const String& topic, byte* payload, unsigned int length)
 {
-    String appRelayTopic = deviceID + "/relay";
-    String appRelayTopicPrefix = appRelayTopic + "/";
-    if (topic == appRelayTopic || topic.startsWith(appRelayTopicPrefix))
+    bool isRgb1 = (topic == rgb1Topic);
+    bool isRgb2 = (topic == rgb2Topic);
+    if (!isRgb1 && !isRgb2)
+    {
+        String rgb1Suffix = "/rgb/1";
+        String rgb2Suffix = "/rgb/2";
+        if (topic.endsWith(rgb1Suffix) || topic.endsWith(rgb2Suffix))
+        {
+            int firstSlash = topic.indexOf('/');
+            String topicDevice = firstSlash > 0 ? topic.substring(0, firstSlash) : "";
+            topicDevice.toUpperCase();
+            if (topicDevice == deviceID)
+            {
+                isRgb1 = topic.endsWith(rgb1Suffix);
+                isRgb2 = topic.endsWith(rgb2Suffix);
+            }
+        }
+    }
+
+    if (topic == relayTopic)
     {
         uint8_t mask;
         bool parsed = false;
         byte payloadCopy[12];
         unsigned int parseLength = length;
 
-        if (topic.startsWith(appRelayTopicPrefix))
+        if (length <= sizeof(payloadCopy))
         {
-            String value = topic.substring(appRelayTopicPrefix.length());
-            if (value == "ack" || value.startsWith("ack/"))
-            {
-                return true;
-            }
-            else
-            {
-                parsed = parseRelayMask((byte*)value.c_str(), value.length(), &mask);
-            }
-        }
-
-        if (!parsed)
-        {
-            if (length <= sizeof(payloadCopy))
-            {
-                memcpy(payloadCopy, payload, length);
-                parsed = parseRelayMask(payloadCopy, parseLength, &mask);
-            }
+            memcpy(payloadCopy, payload, length);
+            parsed = parseRelayMask(payloadCopy, parseLength, &mask);
         }
 
         if (!parsed)
@@ -465,25 +477,40 @@ bool handleHomeAutomationMessage(const String& topic, byte* payload, unsigned in
         return true;
     }
 
-    publishLog("[MQTT] Automation topic received: %s (%u bytes)",
-               topic.c_str(), length);
-
-    String appRgb1Topic = deviceID + "/rgb/1";
-    String appRgb2Topic = deviceID + "/rgb/2";
-    if (topic == appRgb1Topic || topic == appRgb2Topic)
+    if (isRgb1 || isRgb2)
     {
-        uint8_t idx = (topic == appRgb1Topic) ? 0 : 1;
+        char payloadText[96];
+        byte payloadCopy[96];
+        if (length >= sizeof(payloadCopy))
+        {
+            publishLog("[RGB] payload too large len=%u max=%u",
+                       length, (unsigned int)(sizeof(payloadCopy) - 1));
+            return true;
+        }
+
+        memcpy(payloadCopy, payload, length);
+        payloadCopy[length] = '\0';
+        memcpy(payloadText, payloadCopy, length + 1);
+
+        publishLog("[RGB] RX topic=%s payload=%s len=%u",
+                   topic.c_str(), payloadText, length);
+
+        uint8_t idx = isRgb1 ? 0 : 1;
         uint8_t red;
         uint8_t green;
         uint8_t blue;
 
-        if (parseRGBJson(payload, length, &red, &green, &blue))
+        if (parseRGBJson(payloadCopy, length, &red, &green, &blue))
         {
             rgb[idx] = {red, green, blue};
             applyRGB(idx);
             publishRgbAck();
-            publishLog("[RGB%u] app set -> R=%u G=%u B=%u",
-                       idx + 1, red, green, blue);
+            publishLog("[RGB%u] applied common-ground PWM pins R=%u G=%u B=%u values R=%u G=%u B=%u",
+                       idx + 1,
+                       idx == 0 ? RGB1_R : RGB2_R,
+                       idx == 0 ? RGB1_G : RGB2_G,
+                       idx == 0 ? RGB1_B : RGB2_B,
+                       red, green, blue);
         }
         else
         {
@@ -491,6 +518,9 @@ bool handleHomeAutomationMessage(const String& topic, byte* payload, unsigned in
         }
         return true;
     }
+
+    publishLog("[MQTT] Automation topic received: %s (%u bytes)",
+               topic.c_str(), length);
 
     return false;
 }

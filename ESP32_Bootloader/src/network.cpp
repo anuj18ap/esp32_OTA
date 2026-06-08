@@ -376,6 +376,7 @@ void connectWiFi()
     }
 
     // Prints the assigned local IP address after connection.
+    digitalWrite(WIFI_STATUS_LED_PIN, HIGH);
     publishLog("[WiFi] Connected. IP: %s", WiFi.localIP().toString().c_str());
 }
 
@@ -558,12 +559,14 @@ void connectMQTT()
     while (!mqttClient.connected())
     {
         publishLog("[MQTT] Connecting...");
+        digitalWrite(MQTT_STATUS_LED_PIN, LOW);
         // Builds a unique MQTT client ID for this device.
         String clientId = "ESP32-" + deviceID;
 
         // Connects to the broker and restores subscriptions on success.
         if (mqttClient.connect(clientId.c_str()))
         {
+            digitalWrite(MQTT_STATUS_LED_PIN, HIGH);
             publishLog("[MQTT] Connected.");
             publishLog("[MQTT] Client ID: %s", clientId.c_str());
             publishDeviceInfo();
@@ -594,6 +597,7 @@ void connectMQTT()
         }
         else
         {
+            digitalWrite(MQTT_STATUS_LED_PIN, LOW);
             // Waits before retrying if the broker connection fails.
             publishLog("[MQTT] Failed (rc=%d). Retrying...",
                        mqttClient.state());

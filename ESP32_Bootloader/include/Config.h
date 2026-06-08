@@ -1,7 +1,9 @@
 #pragma once
 
-#define FW_VERSION "0.5" // Firmware version published to MQTT.
+#define FW_VERSION "0.6" // Firmware version published to MQTT.
 #define LED_PIN 2        // Onboard LED pin used for heartbeat blinking.
+#define WIFI_STATUS_LED_PIN 16 // External LED ON while Wi-Fi is connected.
+#define MQTT_STATUS_LED_PIN 17 // External LED ON while MQTT is connected.
 
 #define MQTT_BUFFER_SIZE 8192   // Larger MQTT packet buffer for faster OTA chunks.
 #define WIFI_RETRY_DELAY 500    // Delay between Wi-Fi retry attempts.
