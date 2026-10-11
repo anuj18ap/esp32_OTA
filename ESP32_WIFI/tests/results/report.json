@@ -1,0 +1,351 @@
+{
+  "timestamp_utc": "2026-10-11T10:12:01.652001+00:00",
+  "summary": {
+    "passed": 47,
+    "failed": 0,
+    "skipped": 0,
+    "hardware_required": 7
+  },
+  "tests": [
+    {
+      "name": "native compile",
+      "category": "firmware build or static validation",
+      "status": "passed",
+      "details": null
+    },
+    {
+      "name": "startup_busy",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": ""
+    },
+    {
+      "name": "oversize",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": ""
+    },
+    {
+      "name": "begin_failure",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": ""
+    },
+    {
+      "name": "persist_failure",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": ""
+    },
+    {
+      "name": "busy",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS busy\n"
+    },
+    {
+      "name": "journal_pressure",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS journal_pressure\n"
+    },
+    {
+      "name": "sequence",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS sequence\n"
+    },
+    {
+      "name": "length",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS length\n"
+    },
+    {
+      "name": "write_failure",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS write_failure\n"
+    },
+    {
+      "name": "hash_failure",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS hash_failure\n"
+    },
+    {
+      "name": "timeout",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS timeout\n"
+    },
+    {
+      "name": "expiration",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS expiration\n"
+    },
+    {
+      "name": "cancel",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS cancel\n"
+    },
+    {
+      "name": "ble_disconnect",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS ble_disconnect\n"
+    },
+    {
+      "name": "mqtt_disconnect",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS mqtt_disconnect\n"
+    },
+    {
+      "name": "incomplete",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS incomplete\n"
+    },
+    {
+      "name": "crc",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS crc\n"
+    },
+    {
+      "name": "duplicate_changed",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS duplicate_changed\n"
+    },
+    {
+      "name": "reset_receiving",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS reset_receiving\n"
+    },
+    {
+      "name": "image_invalid",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS image_invalid\n"
+    },
+    {
+      "name": "boot_failure",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS boot_failure\n"
+    },
+    {
+      "name": "version",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS version\n"
+    },
+    {
+      "name": "sha_mismatch",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS sha_mismatch\n"
+    },
+    {
+      "name": "duplicate",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS duplicate\n"
+    },
+    {
+      "name": "success",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS success\n"
+    },
+    {
+      "name": "rollback",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS rollback\n"
+    },
+    {
+      "name": "repeat_ab",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": "PASS repeat_ab\n"
+    },
+    {
+      "name": "relay_parser",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": ""
+    },
+    {
+      "name": "metadata_parse",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": ""
+    },
+    {
+      "name": "report_replay",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": ""
+    },
+    {
+      "name": "selection_intent",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": ""
+    },
+    {
+      "name": "interrupted_report_persistence",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": ""
+    },
+    {
+      "name": "rollback_report_persistence",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": ""
+    },
+    {
+      "name": "boot_cleanup_persistence",
+      "category": "host-side unit test (actual C manager; mocked IDF/flash/SHA/NVS)",
+      "status": "passed",
+      "details": ""
+    },
+    {
+      "name": "actual C ENC1 interoperability with Python",
+      "category": "host-side unit test",
+      "status": "passed",
+      "details": "ENC1:AAAAZQAAAGYGwokaHh3EtTkdoE5+3C18hVoJYnb6xpJP9A==\n"
+    },
+    {
+      "name": "ENC1 round trip",
+      "category": "host-side unit test (Python wire helper)",
+      "status": "passed",
+      "details": null
+    },
+    {
+      "name": "ESP-NOW reliable",
+      "category": "simulated transport test",
+      "status": "passed",
+      "details": {
+        "status": "complete",
+        "retries": 0,
+        "duplicates": 0
+      }
+    },
+    {
+      "name": "ESP-NOW loss/retries/duplicates",
+      "category": "simulated transport test",
+      "status": "passed",
+      "details": {
+        "status": "complete",
+        "retries": 10,
+        "duplicates": 6
+      }
+    },
+    {
+      "name": "ESP-NOW total loss timeout",
+      "category": "simulated transport test",
+      "status": "passed",
+      "details": {
+        "status": "timeout",
+        "boot_selected": false,
+        "retries": 8
+      }
+    },
+    {
+      "name": "HTTP fixture valid",
+      "category": "host-side unit test (fault server only)",
+      "status": "passed",
+      "details": null
+    },
+    {
+      "name": "HTTP fixture missing",
+      "category": "host-side unit test (fault server only)",
+      "status": "passed",
+      "details": null
+    },
+    {
+      "name": "HTTP fixture status",
+      "category": "host-side unit test (fault server only)",
+      "status": "passed",
+      "details": null
+    },
+    {
+      "name": "HTTP fixture truncated",
+      "category": "host-side unit test (fault server only)",
+      "status": "passed",
+      "details": null
+    },
+    {
+      "name": "HTTP fixture interrupted",
+      "category": "host-side unit test (fault server only)",
+      "status": "passed",
+      "details": null
+    },
+    {
+      "name": "HTTP fixture corrupt",
+      "category": "host-side unit test (fault server only)",
+      "status": "passed",
+      "details": null
+    },
+    {
+      "name": "built binary fits A/B slots; rollback configuration",
+      "category": "firmware build or static validation",
+      "status": "passed",
+      "details": {
+        "image_bytes": 1196720,
+        "slot_bytes": 1966080,
+        "sha256": "2b2ee649a2a0f32593edc8983040c2a2eeb25fb7d5514a727f396fc430bd02c3"
+      }
+    },
+    {
+      "name": "HTTP/HTTPS device download and failure recovery",
+      "category": "real-device integration test",
+      "status": "hardware_required",
+      "details": null
+    },
+    {
+      "name": "MQTT board/broker disconnect and result replay",
+      "category": "real-device integration test",
+      "status": "hardware_required",
+      "details": null
+    },
+    {
+      "name": "BLE iOS/Android pairing, upload and disconnect",
+      "category": "real-device integration test",
+      "status": "hardware_required",
+      "details": null
+    },
+    {
+      "name": "ESP-NOW two-board loss/retry transfer",
+      "category": "real-device integration test",
+      "status": "hardware_required",
+      "details": null
+    },
+    {
+      "name": "Startup rollback and repeated A/B updates",
+      "category": "real-device integration test",
+      "status": "hardware_required",
+      "details": null
+    },
+    {
+      "name": "GPIO relay/RGB and Arduino application compatibility",
+      "category": "real-device integration test",
+      "status": "hardware_required",
+      "details": null
+    },
+    {
+      "name": "Controlled target power interruption at each OTA stage",
+      "category": "physical power-interruption test",
+      "status": "hardware_required",
+      "details": null
+    }
+  ]
+}

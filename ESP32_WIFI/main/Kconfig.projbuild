@@ -1,0 +1,19 @@
+menu "Home automation OTA"
+    config OTA_ENABLE_LEGACY_MQTT
+        bool "Preserve original Arduino MQTT OTA wire protocol"
+        default y
+        help
+            Original control/chunk topics have no command authentication or wire session ID.
+            Disable in production and use provisioned HMAC requests and v2 chunks.
+    config OTA_ALLOW_DEV_HTTP
+        bool "Allow plain HTTP for local development"
+        default n
+        help
+            HTTPS certificate verification remains enabled. Enable HTTP only on a trusted development LAN.
+    config OTA_BLE_ENABLED
+        bool "Enable bonded BLE OTA transport"
+        default y
+    config OTA_ESPNOW_ENABLED
+        bool "Enable provisioned encrypted ESP-NOW transport"
+        default y
+endmenu

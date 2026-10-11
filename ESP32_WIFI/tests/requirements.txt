@@ -1,0 +1,4 @@
+paho-mqtt==2.1.0
+pyserial==3.5
+# Optional host BLE automation: pip install bleak
+# Optional native host-unit compilation: pip install ziglang==0.13.0

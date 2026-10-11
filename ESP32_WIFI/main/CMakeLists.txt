@@ -1,0 +1,33 @@
+idf_component_register(
+    SRCS
+        "app_main.c"
+        "network.c"
+        "mqtt_crypto.c"
+        "home_automation.c"
+        "ota_protocol.c"
+        "ota_manager.c"
+        "ota_http.c"
+        "ota_ble.c"
+        "ota_espnow.c"
+        "ota_provision.c"
+    INCLUDE_DIRS "."
+    REQUIRES
+        app_update
+        esp_driver_gpio
+        esp_driver_ledc
+        esp_driver_uart
+        esp_event
+        esp_http_client
+        esp_http_server
+        esp_netif
+        esp_timer
+        esp_wifi
+        esp_hw_support
+        esp_partition
+        spi_flash
+        bt
+        json
+        mbedtls
+        mqtt
+        nvs_flash
+)

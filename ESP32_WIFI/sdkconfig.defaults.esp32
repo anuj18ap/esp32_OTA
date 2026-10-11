@@ -1,0 +1,2 @@
+# The relay/RGB pin mapping is specific to the original ESP32 board.
+CONFIG_IDF_TARGET="esp32"

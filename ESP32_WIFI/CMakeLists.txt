@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.16)
+if(DEFINED IDF_TARGET AND NOT IDF_TARGET STREQUAL "esp32")
+    message(FATAL_ERROR "This application preserves ESP32 GPIO wiring and requires target esp32")
+endif()
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+set(PROJECT_VER "0.6")
+project(esp32_home_automation_ota)
