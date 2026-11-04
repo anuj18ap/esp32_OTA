@@ -4,6 +4,10 @@ This folder ports `../ESP32_Bootloader` into native ESP-IDF, preserving device I
 
 Read [inspection](docs/INSPECTION.md), [protocols and device testing](docs/OTA_GUIDE.md), and [recovery analysis](docs/RECOVERY.md). Executed tests: `tests/results/report.json`. Full build log: `docs/build-validation.log`.
 
+The Admin/User station manager and configuration webpage are documented in
+[Admin Wi-Fi](docs/ADMIN_WIFI.md). The former setup SoftAP flow is replaced by
+the external Admin router connection.
+
 ## Build and installation
 
 Use an **ESP-IDF 5.4.1** IDE terminal in this folder:

@@ -1,4 +1,6 @@
 #include "app.h"
+#include "admin_wifi.h"
+#include "esp_crt_bundle.h"
 #include "cJSON.h"
 #include "driver/gpio.h"
 #include "esp_event.h"
@@ -28,26 +30,23 @@
 
 char device_id[13], device_name[128], wifi_ssid[33], wifi_password[65];
 static esp_mqtt_client_handle_t mqtt;
-static EventGroupHandle_t wifi_events;
 static QueueHandle_t messages;
-static httpd_handle_t portal;
-static atomic_bool wifi_online, mqtt_online, connect_event, disconnect_event, retry_station;
+static atomic_bool mqtt_online, connect_event, disconnect_event;
 static atomic_int published_message;
 static atomic_uint connection_epoch;
 static atomic_uint_fast64_t reboot_at;
-static uint64_t connect_started, info_at, report_sent_at;
-static bool provisioning, connecting, mqtt_started;
+static uint64_t info_at, report_sent_at;
+static bool mqtt_started;
+static uint64_t mqtt_config_retry_at;
 static uint32_t mqtt_session, report_id;
 static int report_message = -1;
-static char portal_message[128];
 typedef struct
 {
-    char topic[96];
+    char topic[160];
     size_t len;
     unsigned epoch;
     uint8_t data[];
 } message_t;
-#define WIFI_UP 1
 
 uint64_t app_millis(void)
 {
@@ -55,7 +54,7 @@ uint64_t app_millis(void)
 }
 bool app_wifi_connected(void)
 {
-    return atomic_load(&wifi_online);
+    return admin_wifi_user_online();
 }
 bool app_mqtt_connected(void)
 {
@@ -65,15 +64,21 @@ void app_request_restart(unsigned delay_ms)
 {
     atomic_store(&reboot_at, app_millis() + delay_ms + 1);
 }
+/* Keep legacy topics when no prefix is configured. */
 bool app_publish(const char *suffix, const char *text, int qos, bool retain)
 {
     if (!mqtt || !app_mqtt_connected())
     {
         return false;
     }
-    char topic[96];
-    snprintf(topic, sizeof(topic), !strcmp(suffix, "info") ? "AceTech/%s/%s" : "%s/%s", device_id,
-             suffix);
+    char topic[160];
+    const char *prefix = admin_wifi_mqtt_config()->topic_prefix;
+    if (prefix[0])
+        snprintf(topic, sizeof(topic), !strcmp(suffix, "info") ?
+                 "%s/AceTech/%s/%s" : "%s/%s/%s", prefix, device_id, suffix);
+    else
+        snprintf(topic, sizeof(topic), !strcmp(suffix, "info") ?
+                 "AceTech/%s/%s" : "%s/%s", device_id, suffix);
     return esp_mqtt_client_publish(mqtt, topic, text, 0, qos, retain) >= 0;
 }
 bool app_publish_encrypted(const char *suffix, const char *text, bool retain)
@@ -178,423 +183,13 @@ static void config_load(void)
     }
     nvs_close(nvs);
 }
-static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
-{
-    (void)arg;
-    (void)data;
-    if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP)
-    {
-        atomic_store(&wifi_online, true);
-        gpio_set_level(WIFI_LED_PIN, 1);
-        xEventGroupSetBits(wifi_events, WIFI_UP);
-    }
-    else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED)
-    {
-        atomic_store(&wifi_online, false);
-        atomic_store(&mqtt_online, false);
-        gpio_set_level(WIFI_LED_PIN, 0);
-        gpio_set_level(MQTT_LED_PIN, 0);
-        xEventGroupClearBits(wifi_events, WIFI_UP);
-        atomic_store(&disconnect_event, true);
-        if (atomic_load(&retry_station))
-        {
-            esp_wifi_connect();
-        }
-    }
-}
-static esp_err_t station_credentials(const char *ssid, const char *password)
-{
-    size_t a = strlen(ssid), b = strlen(password);
-    if (!a || a > 32 || b > 64)
-    {
-        return ESP_ERR_INVALID_ARG;
-    }
-    atomic_store(&retry_station, false);
-    esp_wifi_disconnect();
-    xEventGroupClearBits(wifi_events, WIFI_UP);
-    wifi_config_t cfg = {0};
-    memcpy(cfg.sta.ssid, ssid, a);
-    memcpy(cfg.sta.password, password, b);
-    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
-    if (err == ESP_OK)
-    {
-        atomic_store(&retry_station, true);
-        err = esp_wifi_connect();
-    }
-    return err;
-}
-static void dns_task(void *arg)
-{
-    (void)arg;
-    int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    struct sockaddr_in local = {
-        .sin_family = AF_INET, .sin_port = htons(53), .sin_addr.s_addr = htonl(INADDR_ANY)};
-    if (fd < 0 || bind(fd, (struct sockaddr *)&local, sizeof(local)) < 0)
-    {
-        if (fd >= 0)
-        {
-            close(fd);
-        }
-        app_log("[SETUP] DNS start failed");
-        vTaskDelete(NULL);
-        return;
-    }
-    for (;;)
-    {
-        uint8_t packet[512];
-        struct sockaddr_in sender;
-        socklen_t slen = sizeof(sender);
-        int len = recvfrom(fd, packet, sizeof(packet) - 16, 0, (struct sockaddr *)&sender, &slen);
-        if (len < 17 || (packet[2] & 0x80) || packet[4] != 0 || packet[5] != 1)
-        {
-            continue;
-        }
-        size_t end = 12;
-        while (end < (size_t)len && packet[end])
-        {
-            unsigned label = packet[end];
-            if (label > 63 || end + 1 + label >= (size_t)len)
-            {
-                end = len;
-                break;
-            }
-            end += 1 + label;
-        }
-        if (end + 5 > (size_t)len)
-        {
-            continue;
-        }
-        end++;
-        bool a = packet[end] == 0 && packet[end + 1] == 1 && packet[end + 2] == 0 &&
-                 packet[end + 3] == 1;
-        end += 4;
-        packet[2] = 0x81;
-        packet[3] = 0x80;
-        packet[6] = 0;
-        packet[7] = a ? 1 : 0;
-        memset(packet + 8, 0, 4);
-        if (a)
-        {
-            const uint8_t answer[] = {0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4, 192, 168, 4, 1};
-            memcpy(packet + end, answer, sizeof(answer));
-            end += sizeof(answer);
-        }
-        sendto(fd, packet, end, 0, (struct sockaddr *)&sender, slen);
-    }
-}
-static char *escape_html(const char *input)
-{
-    size_t capacity = strlen(input) * 6 + 1;
-    char *out = calloc(1, capacity);
-    if (!out)
-    {
-        return NULL;
-    }
-    for (const char *p = input; *p; p++)
-    {
-        const char *replacement = *p == '&'    ? "&amp;"
-                                  : *p == '<'  ? "&lt;"
-                                  : *p == '>'  ? "&gt;"
-                                  : *p == '\"' ? "&quot;"
-                                               : NULL;
-        size_t n = strlen(out);
-        if (replacement)
-        {
-            strcat(out, replacement);
-        }
-        else
-        {
-            out[n] = *p;
-            out[n + 1] = 0;
-        }
-    }
-    return out;
-}
-static esp_err_t redirect(httpd_req_t *req, const char *path)
-{
-    httpd_resp_set_status(req, "302 Found");
-    httpd_resp_set_hdr(req, "Location", path);
-    return httpd_resp_send(req, "", 0);
-}
-static esp_err_t form_value(const char *form, const char *key, char *out, size_t capacity)
-{
-    out[0] = 0;
-    size_t key_len = strlen(key);
-    for (const char *p = form; *p;)
-    {
-        const char *end = strchr(p, '&');
-        if (!end)
-        {
-            end = p + strlen(p);
-        }
-        if ((size_t)(end - p) > key_len && !strncmp(p, key, key_len) && p[key_len] == '=')
-        {
-            p += key_len + 1;
-            size_t n = 0;
-            while (p < end)
-            {
-                unsigned char c = *p++;
-                if (c == '+')
-                {
-                    c = ' ';
-                }
-                else if (c == '%')
-                {
-                    if (end - p < 2 || !isxdigit((unsigned char)p[0]) ||
-                        !isxdigit((unsigned char)p[1]))
-                    {
-                        return ESP_ERR_INVALID_ARG;
-                    }
-                    char hex[3] = {p[0], p[1], 0};
-                    c = strtoul(hex, NULL, 16);
-                    p += 2;
-                }
-                if (!c || n + 1 >= capacity)
-                {
-                    return ESP_ERR_INVALID_SIZE;
-                }
-                out[n++] = c;
-            }
-            out[n] = 0;
-            return ESP_OK;
-        }
-        p = *end ? end + 1 : end;
-    }
-    return ESP_ERR_NOT_FOUND;
-}
-static esp_err_t read_form(httpd_req_t *req, char *out, size_t capacity)
-{
-    if (req->content_len <= 0 || req->content_len >= capacity)
-    {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    size_t used = 0;
-    unsigned timeouts = 0;
-    while (used < req->content_len)
-    {
-        int n = httpd_req_recv(req, out + used, req->content_len - used);
-        if (n == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < 3)
-        {
-            continue;
-        }
-        if (n <= 0)
-        {
-            return ESP_FAIL;
-        }
-        used += n;
-    }
-    out[used] = 0;
-    return ESP_OK;
-}
-static esp_err_t wifi_page(httpd_req_t *req, const char *message, bool success)
-{
-    httpd_resp_set_type(req, "text/html");
-    httpd_resp_sendstr_chunk(req, "<!DOCTYPE html><html><head><meta name='viewport' "
-                                  "content='width=device-width,initial-scale=1'><title>ESP32 WiFi "
-                                  "Setup</title></head><body><h2>Select WiFi Network</h2><form "
-                                  "action='/connect' method='POST'><select name='ssid' required>");
-    wifi_scan_config_t scan = {0};
-    uint16_t count = 0;
-    if (esp_wifi_scan_start(&scan, true) == ESP_OK)
-    {
-        esp_wifi_scan_get_ap_num(&count);
-    }
-    if (count > 32)
-    {
-        count = 32;
-    }
-    wifi_ap_record_t *records = count ? calloc(count, sizeof(*records)) : NULL;
-    if (records && esp_wifi_scan_get_ap_records(&count, records) == ESP_OK)
-    {
-        for (unsigned i = 0; i < count; i++)
-        {
-            char ssid[33] = {0};
-            memcpy(ssid, records[i].ssid, 32);
-            if (!ssid[0])
-            {
-                continue;
-            }
-            char *escaped = escape_html(ssid);
-            if (!escaped)
-            {
-                continue;
-            }
-            char option[512];
-            snprintf(option, sizeof(option), "<option value=\"%s\">%s (%d dBm)</option>", escaped,
-                     escaped, records[i].rssi);
-            httpd_resp_sendstr_chunk(req, option);
-            free(escaped);
-        }
-    }
-    else
-    {
-        httpd_resp_sendstr_chunk(req, "<option value=''>No WiFi networks found</option>");
-    }
-    free(records);
-    esp_wifi_clear_ap_list();
-    httpd_resp_sendstr_chunk(
-        req, "</select><input id='pass' name='pass' type='password' placeholder='Enter Password' "
-             "required><button type='button' onclick=\"var "
-             "p=document.getElementById('pass');p.type=p.type==='password'?'text':'password'\">"
-             "Show/hide</button><button type='submit'>Connect</button></form>");
-    char *escaped = escape_html(message);
-    if (escaped)
-    {
-        httpd_resp_sendstr_chunk(req,
-                                 success ? "<p style='color:green'>" : "<p style='color:red'>");
-        httpd_resp_sendstr_chunk(req, escaped);
-        httpd_resp_sendstr_chunk(req, "</p>");
-        free(escaped);
-    }
-    httpd_resp_sendstr_chunk(req, "</body></html>");
-    return httpd_resp_send_chunk(req, NULL, 0);
-}
-static esp_err_t portal_get(httpd_req_t *req)
-{
-    if (!strcmp(req->uri, "/"))
-    {
-        return redirect(req, device_name[0] ? "/wifi" : "/name");
-    }
-    if (!strcmp(req->uri, "/wifi"))
-    {
-        return wifi_page(req, portal_message, false);
-    }
-    if (!strcmp(req->uri, "/name"))
-    {
-        char *name = escape_html(device_name);
-        if (!name)
-        {
-            return ESP_ERR_NO_MEM;
-        }
-        httpd_resp_set_type(req, "text/html");
-        httpd_resp_sendstr_chunk(
-            req,
-            "<!DOCTYPE html><html><head><meta name='viewport' "
-            "content='width=device-width,initial-scale=1'></head><body><h2>Enter Device "
-            "Name</h2><form action='/setname' method='POST'><input name='dev' required value=\"");
-        httpd_resp_sendstr_chunk(req, name);
-        free(name);
-        httpd_resp_sendstr_chunk(req,
-                                 "\"><button type='submit'>Continue</button></form></body></html>");
-        return httpd_resp_send_chunk(req, NULL, 0);
-    }
-    return redirect(req, "http://192.168.4.1/");
-}
-static esp_err_t portal_post(httpd_req_t *req)
-{
-    char form[1024];
-    if (read_form(req, form, sizeof(form)) != ESP_OK)
-    {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid form");
-    }
-    if (!strcmp(req->uri, "/setname"))
-    {
-        char name[sizeof(device_name)];
-        if (form_value(form, "dev", name, sizeof(name)) != ESP_OK)
-        {
-            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid device name");
-        }
-        trim(name);
-        snprintf(device_name, sizeof(device_name), "%s", name);
-        if (config_save() != ESP_OK)
-        {
-            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot save name");
-        }
-        return redirect(req, "/wifi");
-    }
-    if (strcmp(req->uri, "/connect"))
-    {
-        return redirect(req, "/");
-    }
-    char ssid[33], password[65];
-    if (form_value(form, "ssid", ssid, sizeof(ssid)) != ESP_OK ||
-        form_value(form, "pass", password, sizeof(password)) != ESP_OK)
-    {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid WiFi credentials");
-    }
-    trim(ssid);
-    if (station_credentials(ssid, password) == ESP_OK &&
-        (xEventGroupWaitBits(wifi_events, WIFI_UP, false, false, pdMS_TO_TICKS(WIFI_TIMEOUT_MS)) &
-         WIFI_UP))
-    {
-        snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", ssid);
-        snprintf(wifi_password, sizeof(wifi_password), "%s", password);
-        if (config_save() != ESP_OK)
-        {
-            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                                       "Cannot save credentials");
-        }
-        esp_err_t err = wifi_page(req, "Connected. Saving and rebooting...", true);
-        app_request_restart(1500);
-        return err;
-    }
-    atomic_store(&retry_station, false);
-    esp_wifi_disconnect();
-    snprintf(portal_message, sizeof(portal_message),
-             "Wrong password or connection failed. Try again.");
-    return wifi_page(req, portal_message, false);
-}
-static esp_err_t start_portal(void)
-{
-    if (provisioning)
-    {
-        return ESP_OK;
-    }
-    atomic_store(&retry_station, false);
-    esp_wifi_disconnect();
-    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
-    if (err != ESP_OK)
-    {
-        return err;
-    }
-    wifi_config_t cfg = {0};
-    snprintf((char *)cfg.ap.ssid, sizeof(cfg.ap.ssid), "ESP32-Setup-%s", device_id + 6);
-    cfg.ap.ssid_len = strlen((char *)cfg.ap.ssid);
-    memcpy(cfg.ap.password, "12345678", 8);
-    cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
-    cfg.ap.max_connection = 4;
-    err = esp_wifi_set_config(WIFI_IF_AP, &cfg);
-    if (err != ESP_OK)
-    {
-        return err;
-    }
-    httpd_config_t http = HTTPD_DEFAULT_CONFIG();
-    http.stack_size = 6144;
-    http.uri_match_fn = httpd_uri_match_wildcard;
-    err = httpd_start(&portal, &http);
-    if (err != ESP_OK)
-    {
-        return err;
-    }
-    httpd_uri_t get = {.uri = "/*", .method = HTTP_GET, .handler = portal_get},
-                post = {.uri = "/*", .method = HTTP_POST, .handler = portal_post};
-    err = httpd_register_uri_handler(portal, &get);
-    if (err == ESP_OK)
-    {
-        err = httpd_register_uri_handler(portal, &post);
-    }
-    if (err != ESP_OK)
-    {
-        httpd_stop(portal);
-        portal = NULL;
-        return err;
-    }
-    if (xTaskCreate(dns_task, "portal_dns", 3072, NULL, 3, NULL) != pdPASS)
-    {
-        return ESP_ERR_NO_MEM;
-    }
-    provisioning = true;
-    connecting = false;
-    app_log("[SETUP] Hotspot %s; open http://192.168.4.1", cfg.ap.ssid);
-    return ESP_OK;
-}
 static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *event_data)
 {
     (void)arg;
     (void)base;
     esp_mqtt_event_handle_t event = event_data;
     static uint8_t assembled[MQTT_BUFFER_SIZE];
-    static char topic[96];
+    static char topic[160];
     static size_t received, total;
     if (id == MQTT_EVENT_CONNECTED)
     {
@@ -667,8 +262,12 @@ static void subscribe_all(void)
                                      "ota/v2/chunk", "ota/v2/end"};
     for (unsigned i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++)
     {
-        char topic[96];
-        snprintf(topic, sizeof(topic), "%s/%s", device_id, suffixes[i]);
+        char topic[160];
+        const char *prefix = admin_wifi_mqtt_config()->topic_prefix;
+        if (prefix[0])
+            snprintf(topic, sizeof(topic), "%s/%s/%s", prefix, device_id, suffixes[i]);
+        else
+            snprintf(topic, sizeof(topic), "%s/%s", device_id, suffixes[i]);
         int qos =
             (!strcmp(suffixes[i], "ota/chunk") || !strcmp(suffixes[i], "ota/v2/chunk")) ? 0 : 1;
         if (esp_mqtt_client_subscribe(mqtt, topic, qos) < 0)
@@ -676,8 +275,11 @@ static void subscribe_all(void)
             app_log("[MQTT] Subscription failed: %s", suffixes[i]);
         }
     }
-    esp_mqtt_client_subscribe(mqtt, "+/rgb/1", 1);
-    esp_mqtt_client_subscribe(mqtt, "+/rgb/2", 1);
+    if (!admin_wifi_mqtt_config()->topic_prefix[0])
+    {
+        esp_mqtt_client_subscribe(mqtt, "+/rgb/1", 1);
+        esp_mqtt_client_subscribe(mqtt, "+/rgb/2", 1);
+    }
 }
 static const char *json_string(const cJSON *doc, const char *key)
 {
@@ -802,6 +404,14 @@ static void extended_request(const uint8_t *data, size_t len)
 static void handle_message(message_t *message)
 {
     const char *topic = message->topic;
+    const char *configured = admin_wifi_mqtt_config()->topic_prefix;
+    if (configured[0])
+    {
+        size_t length = strlen(configured);
+        if (strncmp(topic, configured, length) || topic[length] != '/')
+            return;
+        topic += length + 1;
+    }
     uint8_t *data = message->data;
     size_t len = message->len;
     char prefix[16];
@@ -962,69 +572,31 @@ static void handle_message(message_t *message)
     }
     free(plain);
 }
+/* Build the existing MQTT client around the manager's persisted settings. */
 esp_err_t network_init(void)
 {
     config_load();
-    wifi_events = xEventGroupCreate();
     messages = xQueueCreate(8, sizeof(message_t *));
-    if (!wifi_events || !messages)
-    {
-        return ESP_ERR_NO_MEM;
-    }
-    esp_err_t err = esp_netif_init();
-    if (err != ESP_OK)
-    {
-        return err;
-    }
-    err = esp_event_loop_create_default();
-    if (err != ESP_OK)
-    {
-        return err;
-    }
-    if (!esp_netif_create_default_wifi_sta() || !esp_netif_create_default_wifi_ap())
-    {
-        return ESP_ERR_NO_MEM;
-    }
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    err = esp_wifi_init(&cfg);
-    if (err != ESP_OK)
-    {
-        return err;
-    }
-    err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
-    if (err != ESP_OK)
-    {
-        return err;
-    }
-    err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, NULL);
-    if (err != ESP_OK)
-    {
-        return err;
-    }
-    err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, NULL);
-    if (err != ESP_OK)
-    {
-        return err;
-    }
-    err = esp_wifi_set_mode(WIFI_MODE_STA);
-    if (err == ESP_OK)
-    {
-        err = esp_wifi_start();
-    }
-    if (err != ESP_OK)
-    {
-        return err;
-    }
-    char client_id[32];
-    snprintf(client_id, sizeof(client_id), "ESP32-%s", device_id);
-    esp_mqtt_client_config_t mqtt_cfg = {.broker.address.uri = MQTT_BROKER,
-                                         .credentials.client_id = client_id,
-                                         .session.keepalive = 60,
-                                         .network.timeout_ms = 10000,
-                                         .network.reconnect_timeout_ms = 2000,
-                                         .buffer.size = MQTT_BUFFER_SIZE,
-                                         .buffer.out_size = MQTT_BUFFER_SIZE,
-                                         .task.stack_size = 6144};
+    if (!messages) return ESP_ERR_NO_MEM;
+    esp_err_t err = admin_wifi_init();
+    if (err != ESP_OK) return err;
+    const admin_mqtt_config_t *settings = admin_wifi_mqtt_config();
+    char uri[160], client_id[64];
+    snprintf(uri, sizeof(uri), "%s://%s:%u", settings->tls ? "mqtts" : "mqtt",
+             settings->host, settings->port);
+    snprintf(client_id, sizeof(client_id), "%s", settings->client_id[0]
+             ? settings->client_id : device_id);
+    esp_mqtt_client_config_t mqtt_cfg = {.broker.address.uri = uri,
+        .broker.verification.crt_bundle_attach =
+            settings->tls ? esp_crt_bundle_attach : NULL,
+        .credentials.client_id = client_id,
+        .credentials.username = settings->username[0] ? settings->username : NULL,
+        .credentials.authentication.password =
+            settings->password[0] ? settings->password : NULL,
+        .session.keepalive = 60, .network.timeout_ms = 10000,
+        .network.reconnect_timeout_ms = 2000,
+        .buffer.size = MQTT_BUFFER_SIZE, .buffer.out_size = MQTT_BUFFER_SIZE,
+        .task.stack_size = 6144};
     mqtt = esp_mqtt_client_init(&mqtt_cfg);
     if (!mqtt)
     {
@@ -1035,19 +607,9 @@ esp_err_t network_init(void)
     {
         return err;
     }
-    if (!wifi_ssid[0])
-    {
-        return start_portal();
-    }
-    err = station_credentials(wifi_ssid, wifi_password);
-    if (err != ESP_OK)
-    {
-        return err;
-    }
-    connecting = true;
-    connect_started = app_millis();
     return ESP_OK;
 }
+/* MQTT follows User IP state; the manager alone controls station transitions. */
 void network_process(void)
 {
     uint64_t now = app_millis(), restart = atomic_load(&reboot_at);
@@ -1062,34 +624,39 @@ void network_process(void)
         report_message = -1;
         report_id = 0;
     }
-    if (app_wifi_connected() && !provisioning)
+    admin_wifi_process();
+    if (admin_wifi_mqtt_dirty() && !mqtt_started && now >= mqtt_config_retry_at)
     {
-        connecting = false;
-        if (!mqtt_started)
-        {
-            if (esp_mqtt_client_start(mqtt) == ESP_OK)
-            {
-                mqtt_started = true;
-            }
-        }
+        // The client must be stopped before applying saved broker settings.
+        const admin_mqtt_config_t *settings = admin_wifi_mqtt_config();
+        char uri[160], client_id[64];
+        snprintf(uri, sizeof(uri), "%s://%s:%u", settings->tls ? "mqtts" : "mqtt",
+                 settings->host, settings->port);
+        snprintf(client_id, sizeof(client_id), "%s", settings->client_id[0]
+                 ? settings->client_id : device_id);
+        esp_mqtt_client_config_t cfg = {.broker.address.uri = uri,
+            .broker.verification.crt_bundle_attach =
+                settings->tls ? esp_crt_bundle_attach : NULL,
+            .credentials.client_id = client_id,
+            .credentials.username = settings->username[0] ? settings->username : NULL,
+            .credentials.authentication.password =
+                settings->password[0] ? settings->password : NULL,
+            .session.keepalive = 60, .network.timeout_ms = 10000,
+            .network.reconnect_timeout_ms = 2000,
+            .buffer.size = MQTT_BUFFER_SIZE, .buffer.out_size = MQTT_BUFFER_SIZE,
+            .task.stack_size = 6144};
+        if (esp_mqtt_set_config(mqtt, &cfg) == ESP_OK) admin_wifi_mqtt_applied();
+        else mqtt_config_retry_at = now + 3000;
     }
-    else if (!provisioning)
+    if (app_wifi_connected() && !mqtt_started)
     {
-        if (!connecting)
-        {
-            connecting = true;
-            connect_started = now;
-            atomic_store(&retry_station, true);
-            esp_wifi_connect();
-        }
-        if (now - connect_started >= WIFI_TIMEOUT_MS)
-        {
-            esp_err_t err = start_portal();
-            if (err != ESP_OK)
-            {
-                app_log("[SETUP] Portal start failed: %s", esp_err_to_name(err));
-            }
-        }
+        if (esp_mqtt_client_start(mqtt) == ESP_OK) mqtt_started = true;
+    }
+    else if (!app_wifi_connected() && mqtt_started)
+    {
+        esp_mqtt_client_stop(mqtt);
+        mqtt_started = false;
+        atomic_store(&mqtt_online, false);
     }
     if (atomic_exchange(&connect_event, false))
     {
@@ -1123,11 +690,15 @@ void network_process(void)
     }
     if (app_mqtt_connected() && (report_message < 0 || now - report_sent_at > 10000))
     {
-        char text[640], topic[96];
+        char text[640], topic[160];
         uint32_t id;
         if (ota_report_peek(text, sizeof(text), &id))
         {
-            snprintf(topic, sizeof(topic), "%s/ota/result", device_id);
+            const char *prefix = admin_wifi_mqtt_config()->topic_prefix;
+            if (prefix[0])
+                snprintf(topic, sizeof(topic), "%s/%s/ota/result", prefix, device_id);
+            else
+                snprintf(topic, sizeof(topic), "%s/ota/result", device_id);
             int mid = esp_mqtt_client_publish(mqtt, topic, text, 0, 1, false);
             if (mid >= 0)
             {

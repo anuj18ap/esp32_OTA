@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ESP32 Admin Configuration</title>
+<style>
+:root{font-family:system-ui,sans-serif;background:#101b29;color:#edf3fa}body{max-width:1000px;margin:auto;padding:1rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:1rem}
+section{background:#1c2a3b;border:1px solid #405873;border-radius:12px;padding:1rem}
+label{display:block;margin:.7rem 0}input{box-sizing:border-box;width:100%;padding:.65rem;background:#0e1926;color:white;border:1px solid #7890a9;border-radius:6px}
+input[type=checkbox]{width:auto}button{background:#387fbe;color:white;border:0;border-radius:6px;padding:.65rem;margin:.25rem;cursor:pointer}
+button.danger{background:#aa554d}table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid #43556a;padding:.4rem}
+.scroll{overflow-x:auto}dl{display:grid;grid-template-columns:1fr 1fr;gap:.4rem}dt{color:#bbd0e1}dd{margin:0;overflow-wrap:anywhere}
+small{color:#bbd0e1}#feedback{min-height:1.5rem;color:#ffcf72}
+</style></head><body>
+<h1>ESP32 Admin Configuration</h1><button id="login">Admin password</button><p id="feedback" role="status"></p>
+<div class="grid">
+<section><h2>Device information</h2><dl id="device"></dl>
+<form id="nameForm"><label>Device name<input id="deviceName" maxlength="127" required></label><button>Save device name</button></form></section>
+<section><h2>Admin Wi-Fi</h2><dl id="admin"></dl><small>The configuration page uses HTTP on the trusted Admin network.</small></section>
+<section><h2>User Wi-Fi</h2><p>Saved SSID: <strong id="saved">—</strong></p>
+<p>Availability: <strong id="availability">NOT SCANNED</strong></p><p id="details"></p>
+<small>Detection does not verify the password, DHCP, or MQTT.</small><br>
+<button id="check">Check saved User Wi-Fi availability</button>
+<form id="wifiForm"><label>SSID<input id="ssid" maxlength="32" required></label>
+<label>Password (blank preserves saved value)<input id="wifiPassword" type="password" maxlength="64" autocomplete="new-password"></label>
+<label><input id="open" type="checkbox"> Open network (clear saved password)</label>
+<button>Save User Wi-Fi</button></form></section>
+<section><h2>Available networks</h2><button id="scan">Scan available Wi-Fi networks</button>
+<button id="refresh">Refresh results</button><p id="scanState">Not scanned</p>
+<div class="scroll"><table><thead><tr><th>SSID</th><th>RSSI</th><th>Security</th><th>Channel</th><th></th></tr></thead>
+<tbody id="networks"></tbody></table></div><small>Hidden SSIDs can be entered manually.</small></section>
+<section><h2>MQTT configuration</h2><form id="mqttForm">
+<label>Broker hostname or IP<input id="host" maxlength="127" required></label>
+<label>Port<input id="port" type="number" min="1" max="65535" required></label>
+<label>Client ID<input id="client" maxlength="63"></label>
+<label>Username<input id="username" maxlength="63"></label>
+<label>Password (blank preserves saved value)<input id="mqttPassword" type="password" maxlength="127" autocomplete="new-password"></label>
+<label>Topic prefix<input id="prefix" maxlength="63"></label>
+<label><input id="tls" type="checkbox"> TLS enabled</label><button>Save MQTT configuration</button></form></section>
+<section><h2>Wi-Fi control</h2><p>Switching will disconnect this page. Reset the device to restore Admin-first priority.</p>
+<button class="danger" id="force">Force Connect to User Wi-Fi</button></section>
+</div>
+<script>
+let password='';
+const $=id=>document.getElementById(id);
+function notice(text){$('feedback').textContent=text}
+async function api(path,method='GET',data){
+ const response=await fetch(path,{method,headers:{'X-Admin-Password':password,...(data?{'Content-Type':'application/json'}:{})},
+ body:data?JSON.stringify(data):undefined,cache:'no-store'});
+ if(!response.ok)throw Error((await response.text()).slice(0,180)||response.statusText);
+ return response.json();
+}
+function pairs(id,items){const el=$(id);el.replaceChildren();for(const [name,value] of items){
+ const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=name;dd.textContent=String(value);el.append(dt,dd)}}
+function showAvailability(a){$('availability').textContent=a.ssid_status;
+ $('details').textContent=a.ssid_found?'Strongest AP: '+a.rssi+' dBm, '+a.security+', channel '+a.channel+'. Wi-Fi and MQTT not tested.':
+ 'Wi-Fi and MQTT not tested. Hidden SSIDs may not appear.'}
+async function load(){try{
+ const [s,c,a]=await Promise.all([api('/api/device/status'),api('/api/wifi/config'),api('/api/wifi/user-availability')]);
+ pairs('device',[['Device ID',s.device_id],['Name',s.device_name||'—'],['Firmware',s.firmware],
+ ['Uptime',Math.floor(s.uptime_ms/1000)+' s'],['Mode',s.mode],['Connected network',s.connected_ssid],
+ ['IP address',s.ip_address],['MAC address',s.mac_address],['RSSI',s.rssi+' dBm'],
+ ['MQTT',s.mqtt_connected?'Connected':'Disconnected']]);
+ pairs('admin',[['Connection','Connected'],['IP address',s.ip_address],['RSSI',s.rssi+' dBm']]);
+ $('deviceName').value=s.device_name;$('saved').textContent=c.user_ssid||'Not configured';$('ssid').value=c.user_ssid;
+ $('host').value=c.mqtt.host;$('port').value=c.mqtt.port;$('client').value=c.mqtt.client_id;
+ $('username').value=c.mqtt.username;$('prefix').value=c.mqtt.topic_prefix;$('tls').checked=c.mqtt.tls;
+ showAvailability(a);
+ }catch(e){notice('Authentication or connection failed: '+e.message)}}
+async function results(){try{
+ const r=await api('/api/wifi/scan-results');$('scanState').textContent='Scan: '+r.status;
+ const body=$('networks');body.replaceChildren();
+ for(const n of r.networks){const tr=document.createElement('tr');
+ for(const value of [n.ssid||'(hidden)',n.rssi+' dBm',n.security,n.channel]){const td=document.createElement('td');td.textContent=value;tr.append(td)}
+ const td=document.createElement('td'),button=document.createElement('button');button.textContent='Select';button.disabled=!n.ssid;
+ button.onclick=()=>{$('ssid').value=n.ssid;$('open').checked=n.security==='Open';$('wifiPassword').value='';
+ notice('Selected network. Save to keep this configuration.')};td.append(button);tr.append(td);body.append(tr)}
+ showAvailability(await api('/api/wifi/user-availability'));return r.status;
+ }catch(e){notice(e.message);return 'failed'}}
+async function scan(){try{await api('/api/wifi/scan');for(let i=0;i<25;i++){
+ await new Promise(r=>setTimeout(r,500));if(await results()!=='running')break}}catch(e){notice(e.message)}}
+$('login').onclick=()=>{const p=prompt('Admin webpage password');if(p!==null){password=p;load()}};
+$('scan').onclick=scan;$('check').onclick=scan;$('refresh').onclick=results;
+$('nameForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/device/name','POST',{name:$('deviceName').value});notice('Device name saved.')}catch(x){notice(x.message)}};
+$('wifiForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/wifi/user','POST',
+ {ssid:$('ssid').value,password:$('wifiPassword').value,open_network:$('open').checked});
+ $('wifiPassword').value='';notice('User Wi-Fi saved. Admin remains connected.');await load()}catch(x){notice(x.message)}};
+$('mqttForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/mqtt/config','POST',
+ {host:$('host').value,port:Number($('port').value),client_id:$('client').value,
+ username:$('username').value,password:$('mqttPassword').value,topic_prefix:$('prefix').value,tls:$('tls').checked});
+ $('mqttPassword').value='';notice('MQTT settings saved.')}catch(x){notice(x.message)}};
+$('force').onclick=async()=>{if(!confirm('Disconnect Admin and connect only to User Wi-Fi until reset?'))return;
+ try{const r=await api('/api/wifi/force-user','POST',{action:'force_user_wifi'});notice(r.message)}catch(e){notice(e.message)}};
+password=prompt('Admin webpage password')||'';load();
+</script></body></html>

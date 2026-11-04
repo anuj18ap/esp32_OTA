@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "app_main.c"
         "network.c"
+        "admin_wifi.c"
         "mqtt_crypto.c"
         "home_automation.c"
         "ota_protocol.c"
@@ -11,6 +12,7 @@ idf_component_register(
         "ota_espnow.c"
         "ota_provision.c"
     INCLUDE_DIRS "."
+    EMBED_TXTFILES "admin.html"
     REQUIRES
         app_update
         esp_driver_gpio

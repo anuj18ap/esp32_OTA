@@ -1,4 +1,9 @@
 menu "Home automation OTA"
+    config ADMIN_WEB_PASSWORD
+        string "Admin webpage password (set uniquely before deployment)"
+        default "admin-setup-change-me"
+        help
+            Separate HTTP configuration password. Change for every installation.
     config OTA_ENABLE_LEGACY_MQTT
         bool "Preserve original Arduino MQTT OTA wire protocol"
         default y
